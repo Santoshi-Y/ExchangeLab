@@ -33,8 +33,17 @@ public:
         return total_quantity_;
     }
 
+    [[nodiscard]] Order& front() {
+        return orders_.front();
+    }
+
     [[nodiscard]] const Order& front() const {
         return orders_.front();
+    }
+
+    void pop_front() {
+        total_quantity_ -= orders_.front().remaining_quantity;
+        orders_.pop_front();
     }
 
 private:
@@ -43,4 +52,4 @@ private:
     std::deque<Order> orders_;
 };
 
-}  // namespace exchange
+} // namespace exchange

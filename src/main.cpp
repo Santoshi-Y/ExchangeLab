@@ -1,22 +1,29 @@
 #include <iostream>
 
-#include "exchange/trade.hpp"
+#include "exchange/price_level.hpp"
 
 int main() {
 
-    exchange::Trade trade{
-        .buy_order_id = 12,
-        .sell_order_id = 7,
-        .price = 103,
-        .quantity = 25,
-        .timestamp = 15
-    };
+    exchange::PriceLevel level{103};
 
-    std::cout << "Trade Executed\n";
-    std::cout << "Buy Order: " << trade.buy_order_id << '\n';
-    std::cout << "Sell Order: " << trade.sell_order_id << '\n';
-    std::cout << "Price: " << trade.price << '\n';
-    std::cout << "Quantity: " << trade.quantity << '\n';
+    level.add_order({
+        .id = 1,
+        .side = exchange::Side::Buy,
+        .type = exchange::OrderType::Limit,
+        .time_in_force = exchange::TimeInForce::GoodTillCancel,
+        .price = 103,
+        .initial_quantity = 20,
+        .remaining_quantity = 20,
+        .timestamp = 1
+    });
+
+    std::cout << "Before fill\n";
+    std::cout << level.front().remaining_quantity << '\n';
+
+    level.front().remaining_quantity -= 5;
+
+    std::cout << "After partial fill\n";
+    std::cout << level.front().remaining_quantity << '\n';
 
     return 0;
 }
