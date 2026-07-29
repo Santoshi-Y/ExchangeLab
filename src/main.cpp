@@ -1,39 +1,61 @@
 #include <iostream>
 
-#include "exchange/price_level.hpp"
+#include "exchange/order_book.hpp"
 
 int main() {
-    exchange::PriceLevel level{10'025};
 
-    const exchange::Order first_order{
+    exchange::OrderBook book;
+
+    book.add_order({
         .id = 1,
         .side = exchange::Side::Buy,
         .type = exchange::OrderType::Limit,
         .time_in_force = exchange::TimeInForce::GoodTillCancel,
-        .price = 10'025,
-        .initial_quantity = 100,
-        .remaining_quantity = 100,
+        .price = 101,
+        .initial_quantity = 10,
+        .remaining_quantity = 10,
         .timestamp = 1
-    };
+    });
 
-    const exchange::Order second_order{
+    book.add_order({
         .id = 2,
         .side = exchange::Side::Buy,
         .type = exchange::OrderType::Limit,
         .time_in_force = exchange::TimeInForce::GoodTillCancel,
-        .price = 10'025,
-        .initial_quantity = 50,
-        .remaining_quantity = 50,
+        .price = 103,
+        .initial_quantity = 5,
+        .remaining_quantity = 5,
         .timestamp = 2
-    };
+    });
 
-    level.add_order(first_order);
-    level.add_order(second_order);
+    book.add_order({
+        .id = 3,
+        .side = exchange::Side::Sell,
+        .type = exchange::OrderType::Limit,
+        .time_in_force = exchange::TimeInForce::GoodTillCancel,
+        .price = 106,
+        .initial_quantity = 8,
+        .remaining_quantity = 8,
+        .timestamp = 3
+    });
 
-    std::cout << "Price: " << level.price() << '\n';
-    std::cout << "Orders: " << level.order_count() << '\n';
-    std::cout << "Total quantity: " << level.total_quantity() << '\n';
-    std::cout << "First order ID: " << level.front().id << '\n';
+    std::cout << "Bid Levels\n";
+
+    for (const auto& [price, level] : book.bids()) {
+        std::cout << price
+                  << " -> "
+                  << level.total_quantity()
+                  << '\n';
+    }
+
+    std::cout << "\nAsk Levels\n";
+
+    for (const auto& [price, level] : book.asks()) {
+        std::cout << price
+                  << " -> "
+                  << level.total_quantity()
+                  << '\n';
+    }
 
     return 0;
 }
