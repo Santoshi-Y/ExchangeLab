@@ -58,11 +58,17 @@ option(
     ON
 )
 
+option(
+    EXCHANGELAB_BUILD_BENCHMARKS
+    "Build ExchangeLab benchmarks"
+    ON
+)
+
+include(FetchContent)
+
 if(EXCHANGELAB_BUILD_TESTS)
     include(CTest)
     enable_testing()
-
-    include(FetchContent)
 
     FetchContent_Declare(
         googletest
@@ -107,4 +113,67 @@ if(EXCHANGELAB_BUILD_TESTS)
     include(GoogleTest)
 
     gtest_discover_tests(exchange_lab_tests)
+endif()
+
+if(EXCHANGELAB_BUILD_BENCHMARKS)
+    set(
+        BENCHMARK_ENABLE_TESTING
+        OFF
+        CACHE BOOL
+        "Disable Google Benchmark tests"
+        FORCE
+    )
+
+    set(
+        BENCHMARK_ENABLE_GTEST_TESTS
+        OFF
+        CACHE BOOL
+        "Disable Google Benchmark GoogleTest tests"
+        FORCE
+    )
+
+    set(
+        BENCHMARK_ENABLE_INSTALL
+        OFF
+        CACHE BOOL
+        "Disable Google Benchmark installation"
+        FORCE
+    )
+
+    FetchContent_Declare(
+        googlebenchmark
+        URL
+            https://github.com/google/benchmark/archive/refs/tags/v1.9.5.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+
+    FetchContent_MakeAvailable(googlebenchmark)
+
+    add_executable(
+        exchange_lab_benchmarks
+        benchmarks/exchange_benchmark.cpp
+    )
+
+    target_link_libraries(
+        exchange_lab_benchmarks
+        PRIVATE
+            exchange_lab_lib
+            benchmark::benchmark_main
+    )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(
+            exchange_lab_benchmarks
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+    )
+    elseif(MSVC)
+        target_compile_options(
+            exchange_lab_benchmarks
+            PRIVATE
+                /W4
+        )
+    endif()
 endif()
