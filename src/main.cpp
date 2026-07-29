@@ -17,13 +17,23 @@ int main() {
         .timestamp = 1
     });
 
-    std::cout << "Before fill\n";
-    std::cout << level.front().remaining_quantity << '\n';
+    std::cout << "Quantity before: "
+              << level.total_quantity()
+              << '\n';
 
-    level.front().remaining_quantity -= 5;
+    level.fill_front(7);
 
-    std::cout << "After partial fill\n";
-    std::cout << level.front().remaining_quantity << '\n';
+    std::cout << "Quantity after: "
+              << level.total_quantity()
+              << '\n';
 
-    return 0;
+    std::cout << "Remaining: "
+              << level.front().remaining_quantity
+              << '\n';
+
+    level.fill_front(13);
+
+    std::cout << "Orders remaining: "
+              << level.order_count()
+              << '\n';
 }

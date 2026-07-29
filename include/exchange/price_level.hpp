@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <deque>
 
@@ -41,9 +42,18 @@ public:
         return orders_.front();
     }
 
-    void pop_front() {
-        total_quantity_ -= orders_.front().remaining_quantity;
-        orders_.pop_front();
+    void fill_front(Quantity quantity) {
+        auto& order = orders_.front();
+
+        Quantity filled =
+            std::min(quantity, order.remaining_quantity);
+
+        order.remaining_quantity -= filled;
+        total_quantity_ -= filled;
+
+        if (order.remaining_quantity == 0) {
+            orders_.pop_front();
+        }
     }
 
 private:
