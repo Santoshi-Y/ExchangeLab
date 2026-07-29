@@ -22,6 +22,36 @@ public:
     }
 
 private:
+    [[nodiscard]] static bool buy_can_match(
+        const Order& incoming,
+        const OrderBook& book
+    ) {
+        if (!book.has_asks()) {
+            return false;
+        }
+
+        if (incoming.type == OrderType::Market) {
+            return true;
+        }
+
+        return incoming.price >= book.best_ask();
+    }
+
+    [[nodiscard]] static bool sell_can_match(
+        const Order& incoming,
+        const OrderBook& book
+    ) {
+        if (!book.has_bids()) {
+            return false;
+        }
+
+        if (incoming.type == OrderType::Market) {
+            return true;
+        }
+
+        return incoming.price <= book.best_bid();
+    }
+
     [[nodiscard]] std::vector<Trade> match_buy(
         OrderBook& book,
         Order incoming
@@ -30,8 +60,7 @@ private:
 
         while (
             incoming.remaining_quantity > 0 &&
-            book.has_asks() &&
-            incoming.price >= book.best_ask()
+            buy_can_match(incoming, book)
         ) {
             PriceLevel& ask_level = book.best_ask_level();
             const Order& resting_sell = ask_level.front();
@@ -55,8 +84,13 @@ private:
             book.remove_best_ask_if_empty();
         }
 
-        // A limit order that was not completely filled rests on the book.
-        if (incoming.remaining_quantity > 0) {
+        // Only unfilled limit orders may rest on the book.
+        // Market orders are discarded after available liquidity
+        // has been consumed.
+        if (
+            incoming.remaining_quantity > 0 &&
+            incoming.type == OrderType::Limit
+        ) {
             book.add_order(incoming);
         }
 
@@ -71,8 +105,7 @@ private:
 
         while (
             incoming.remaining_quantity > 0 &&
-            book.has_bids() &&
-            incoming.price <= book.best_bid()
+            sell_can_match(incoming, book)
         ) {
             PriceLevel& bid_level = book.best_bid_level();
             const Order& resting_buy = bid_level.front();
@@ -96,8 +129,10 @@ private:
             book.remove_best_bid_if_empty();
         }
 
-        // A limit order that was not completely filled rests on the book.
-        if (incoming.remaining_quantity > 0) {
+        if (
+            incoming.remaining_quantity > 0 &&
+            incoming.type == OrderType::Limit
+        ) {
             book.add_order(incoming);
         }
 

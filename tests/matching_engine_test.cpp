@@ -9,12 +9,13 @@ exchange::Order make_order(
     exchange::Side side,
     exchange::Price price,
     exchange::Quantity quantity,
-    exchange::Timestamp timestamp
+    exchange::Timestamp timestamp,
+    exchange::OrderType type = exchange::OrderType::Limit
 ) {
     return {
         .id = id,
         .side = side,
-        .type = exchange::OrderType::Limit,
+        .type = type,
         .time_in_force =
             exchange::TimeInForce::GoodTillCancel,
         .price = price,
@@ -484,4 +485,242 @@ TEST(MatchingEngineTest, EmptyBookCausesOrderToRest) {
         book.best_bid_level().total_quantity(),
         25
     );
+}
+
+TEST(MatchingEngineTest, MarketBuyIgnoresLimitPrice) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    book.add_order(
+        make_order(
+            1,
+            exchange::Side::Sell,
+            105,
+            20,
+            1
+        )
+    );
+
+    // The price field is deliberately below the best ask.
+    // A limit buy at 100 would not match an ask at 105.
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            100,
+            20,
+            2,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+
+    EXPECT_EQ(trades[0].buy_order_id, 2);
+    EXPECT_EQ(trades[0].sell_order_id, 1);
+    EXPECT_EQ(trades[0].price, 105);
+    EXPECT_EQ(trades[0].quantity, 20);
+
+    EXPECT_FALSE(book.has_bids());
+    EXPECT_FALSE(book.has_asks());
+}
+
+TEST(MatchingEngineTest, MarketSellIgnoresLimitPrice) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    book.add_order(
+        make_order(
+            1,
+            exchange::Side::Buy,
+            95,
+            20,
+            1
+        )
+    );
+
+    // The price field is deliberately above the best bid.
+    // A limit sell at 100 would not match a bid at 95.
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Sell,
+            100,
+            20,
+            2,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+
+    EXPECT_EQ(trades[0].buy_order_id, 1);
+    EXPECT_EQ(trades[0].sell_order_id, 2);
+    EXPECT_EQ(trades[0].price, 95);
+    EXPECT_EQ(trades[0].quantity, 20);
+
+    EXPECT_FALSE(book.has_bids());
+    EXPECT_FALSE(book.has_asks());
+}
+
+TEST(MatchingEngineTest, MarketBuyConsumesMultipleAskLevels) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    book.add_order(
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    book.add_order(
+        make_order(
+            2,
+            exchange::Side::Sell,
+            102,
+            20,
+            2
+        )
+    );
+
+    book.add_order(
+        make_order(
+            3,
+            exchange::Side::Sell,
+            104,
+            30,
+            3
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            10,
+            exchange::Side::Buy,
+            0,
+            45,
+            10,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 3U);
+
+    EXPECT_EQ(trades[0].sell_order_id, 1);
+    EXPECT_EQ(trades[0].price, 101);
+    EXPECT_EQ(trades[0].quantity, 10);
+
+    EXPECT_EQ(trades[1].sell_order_id, 2);
+    EXPECT_EQ(trades[1].price, 102);
+    EXPECT_EQ(trades[1].quantity, 20);
+
+    EXPECT_EQ(trades[2].sell_order_id, 3);
+    EXPECT_EQ(trades[2].price, 104);
+    EXPECT_EQ(trades[2].quantity, 15);
+
+    ASSERT_TRUE(book.has_asks());
+    EXPECT_EQ(book.best_ask(), 104);
+    EXPECT_EQ(
+        book.best_ask_level().total_quantity(),
+        15
+    );
+
+    EXPECT_FALSE(book.has_bids());
+}
+
+TEST(MatchingEngineTest, UnfilledMarketBuyDoesNotRest) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    book.add_order(
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            0,
+            25,
+            2,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+    EXPECT_EQ(trades[0].quantity, 10);
+
+    // The remaining 15 units are discarded rather than
+    // placed on the bid side.
+    EXPECT_FALSE(book.has_bids());
+    EXPECT_FALSE(book.has_asks());
+}
+
+TEST(MatchingEngineTest, UnfilledMarketSellDoesNotRest) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    book.add_order(
+        make_order(
+            1,
+            exchange::Side::Buy,
+            100,
+            10,
+            1
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Sell,
+            0,
+            25,
+            2,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+    EXPECT_EQ(trades[0].quantity, 10);
+
+    EXPECT_FALSE(book.has_bids());
+    EXPECT_FALSE(book.has_asks());
+}
+
+TEST(MatchingEngineTest, MarketOrderOnEmptyBookDoesNotRest) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Buy,
+            0,
+            25,
+            1,
+            exchange::OrderType::Market
+        )
+    );
+
+    EXPECT_TRUE(trades.empty());
+    EXPECT_TRUE(book.empty());
+    EXPECT_FALSE(book.has_bids());
+    EXPECT_FALSE(book.has_asks());
 }

@@ -6,37 +6,59 @@ int main() {
     exchange::OrderBook book;
     exchange::MatchingEngine engine;
 
-    const exchange::Order resting_sell{
+    book.add_order({
         .id = 1,
         .side = exchange::Side::Sell,
         .type = exchange::OrderType::Limit,
         .time_in_force =
             exchange::TimeInForce::GoodTillCancel,
         .price = 101,
-        .initial_quantity = 40,
-        .remaining_quantity = 40,
+        .initial_quantity = 10,
+        .remaining_quantity = 10,
         .timestamp = 1
-    };
+    });
 
-    book.add_order(resting_sell);
-
-    const exchange::Order incoming_buy{
+    book.add_order({
         .id = 2,
-        .side = exchange::Side::Buy,
+        .side = exchange::Side::Sell,
         .type = exchange::OrderType::Limit,
         .time_in_force =
             exchange::TimeInForce::GoodTillCancel,
-        .price = 105,
-        .initial_quantity = 25,
-        .remaining_quantity = 25,
+        .price = 102,
+        .initial_quantity = 20,
+        .remaining_quantity = 20,
         .timestamp = 2
+    });
+
+    book.add_order({
+        .id = 3,
+        .side = exchange::Side::Sell,
+        .type = exchange::OrderType::Limit,
+        .time_in_force =
+            exchange::TimeInForce::GoodTillCancel,
+        .price = 104,
+        .initial_quantity = 30,
+        .remaining_quantity = 30,
+        .timestamp = 3
+    });
+
+    const exchange::Order market_buy{
+        .id = 10,
+        .side = exchange::Side::Buy,
+        .type = exchange::OrderType::Market,
+        .time_in_force =
+            exchange::TimeInForce::ImmediateOrCancel,
+        .price = 0,
+        .initial_quantity = 45,
+        .remaining_quantity = 45,
+        .timestamp = 10
     };
 
     const auto trades =
-        engine.process_order(book, incoming_buy);
+        engine.process_order(book, market_buy);
 
-    std::cout << "ExchangeLab\n";
-    std::cout << "===========\n";
+    std::cout << "ExchangeLab Market Order Demo\n";
+    std::cout << "=============================\n";
 
     for (const auto& trade : trades) {
         std::cout
@@ -54,6 +76,8 @@ int main() {
             << " x "
             << book.best_ask_level().total_quantity()
             << '\n';
+    } else {
+        std::cout << "No asks remain.\n";
     }
 
     return 0;
