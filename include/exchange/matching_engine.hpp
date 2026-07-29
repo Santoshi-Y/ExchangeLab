@@ -21,6 +21,13 @@ public:
         return match_sell(book, incoming);
     }
 
+    [[nodiscard]] bool cancel_order(
+        OrderBook& book,
+        OrderId order_id
+    ) {
+        return book.cancel_order(order_id);
+    }
+
 private:
     [[nodiscard]] static bool buy_can_match(
         const Order& incoming,
@@ -65,9 +72,15 @@ private:
             PriceLevel& ask_level = book.best_ask_level();
             const Order& resting_sell = ask_level.front();
 
+            const OrderId resting_order_id =
+                resting_sell.id;
+
+            const Quantity resting_quantity =
+                resting_sell.remaining_quantity;
+
             const Quantity trade_quantity = std::min(
                 incoming.remaining_quantity,
-                resting_sell.remaining_quantity
+                resting_quantity
             );
 
             trades.push_back({
@@ -80,6 +93,10 @@ private:
 
             incoming.remaining_quantity -= trade_quantity;
             ask_level.fill_front(trade_quantity);
+
+            if (trade_quantity == resting_quantity) {
+                book.remove_from_index(resting_order_id);
+            }
 
             book.remove_best_ask_if_empty();
         }
@@ -110,9 +127,15 @@ private:
             PriceLevel& bid_level = book.best_bid_level();
             const Order& resting_buy = bid_level.front();
 
+            const OrderId resting_order_id =
+                resting_buy.id;
+
+            const Quantity resting_quantity =
+                resting_buy.remaining_quantity;
+
             const Quantity trade_quantity = std::min(
                 incoming.remaining_quantity,
-                resting_buy.remaining_quantity
+                resting_quantity
             );
 
             trades.push_back({
@@ -125,6 +148,10 @@ private:
 
             incoming.remaining_quantity -= trade_quantity;
             bid_level.fill_front(trade_quantity);
+
+            if (trade_quantity == resting_quantity) {
+                book.remove_from_index(resting_order_id);
+            }
 
             book.remove_best_bid_if_empty();
         }

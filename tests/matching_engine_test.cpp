@@ -724,3 +724,170 @@ TEST(MatchingEngineTest, MarketOrderOnEmptyBookDoesNotRest) {
     EXPECT_FALSE(book.has_bids());
     EXPECT_FALSE(book.has_asks());
 }
+
+TEST(MatchingEngineTest, CancelsRestingOrderById) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Buy,
+            100,
+            25,
+            1
+        )
+    );
+
+    ASSERT_TRUE(book.contains(1));
+
+    EXPECT_TRUE(engine.cancel_order(book, 1));
+
+    EXPECT_FALSE(book.contains(1));
+    EXPECT_TRUE(book.empty());
+}
+
+TEST(MatchingEngineTest, FullyFilledOrderLeavesIndex) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            20,
+            1
+        )
+    );
+
+    ASSERT_TRUE(book.contains(1));
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            101,
+            20,
+            2
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+
+    EXPECT_FALSE(book.contains(1));
+    EXPECT_FALSE(book.contains(2));
+    EXPECT_EQ(book.order_count(), 0U);
+    EXPECT_TRUE(book.empty());
+}
+
+TEST(MatchingEngineTest, PartialFillKeepsOrderIndexed) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            30,
+            1
+        )
+    );
+
+    engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            101,
+            10,
+            2
+        )
+    );
+
+    EXPECT_TRUE(book.contains(1));
+    EXPECT_FALSE(book.contains(2));
+    EXPECT_EQ(book.order_count(), 1U);
+
+    ASSERT_TRUE(book.has_asks());
+    EXPECT_EQ(
+        book.best_ask_level().front()
+            .remaining_quantity,
+        20
+    );
+
+    EXPECT_TRUE(engine.cancel_order(book, 1));
+    EXPECT_TRUE(book.empty());
+}
+
+TEST(MatchingEngineTest, MarketSweepUpdatesOrderIndex) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Sell,
+            102,
+            20,
+            2
+        )
+    );
+
+    engine.process_order(
+        book,
+        make_order(
+            3,
+            exchange::Side::Sell,
+            103,
+            30,
+            3
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            10,
+            exchange::Side::Buy,
+            0,
+            35,
+            10,
+            exchange::OrderType::Market
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 3U);
+
+    EXPECT_FALSE(book.contains(1));
+    EXPECT_FALSE(book.contains(2));
+    EXPECT_TRUE(book.contains(3));
+    EXPECT_FALSE(book.contains(10));
+
+    EXPECT_EQ(book.order_count(), 1U);
+
+    ASSERT_TRUE(book.has_asks());
+    EXPECT_EQ(book.best_ask(), 103);
+    EXPECT_EQ(
+        book.best_ask_level().front()
+            .remaining_quantity,
+        25
+    );
+}
