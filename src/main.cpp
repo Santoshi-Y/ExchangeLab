@@ -6,81 +6,55 @@ int main() {
     exchange::OrderBook book;
     exchange::MatchingEngine engine;
 
-    // Three sell orders arrive at the same price.
-    book.add_order({
+    const exchange::Order resting_sell{
         .id = 1,
         .side = exchange::Side::Sell,
         .type = exchange::OrderType::Limit,
         .time_in_force =
             exchange::TimeInForce::GoodTillCancel,
         .price = 101,
-        .initial_quantity = 10,
-        .remaining_quantity = 10,
+        .initial_quantity = 40,
+        .remaining_quantity = 40,
         .timestamp = 1
-    });
+    };
 
-    book.add_order({
+    book.add_order(resting_sell);
+
+    const exchange::Order incoming_buy{
         .id = 2,
-        .side = exchange::Side::Sell,
+        .side = exchange::Side::Buy,
         .type = exchange::OrderType::Limit,
         .time_in_force =
             exchange::TimeInForce::GoodTillCancel,
-        .price = 101,
-        .initial_quantity = 20,
-        .remaining_quantity = 20,
+        .price = 105,
+        .initial_quantity = 25,
+        .remaining_quantity = 25,
         .timestamp = 2
-    });
+    };
 
-    book.add_order({
-        .id = 3,
-        .side = exchange::Side::Sell,
-        .type = exchange::OrderType::Limit,
-        .time_in_force =
-            exchange::TimeInForce::GoodTillCancel,
-        .price = 101,
-        .initial_quantity = 30,
-        .remaining_quantity = 30,
-        .timestamp = 3
-    });
+    const auto trades =
+        engine.process_order(book, incoming_buy);
 
-    const auto trades = engine.process_order(
-        book,
-        {
-            .id = 10,
-            .side = exchange::Side::Buy,
-            .type = exchange::OrderType::Limit,
-            .time_in_force =
-                exchange::TimeInForce::GoodTillCancel,
-            .price = 101,
-            .initial_quantity = 35,
-            .remaining_quantity = 35,
-            .timestamp = 10
-        }
-    );
+    std::cout << "ExchangeLab\n";
+    std::cout << "===========\n";
 
     for (const auto& trade : trades) {
         std::cout
-            << "Matched sell order "
-            << trade.sell_order_id
-            << " for "
+            << "Trade: "
             << trade.quantity
+            << " units at "
+            << trade.price
             << '\n';
     }
 
-    std::cout
-        << "Remaining ask quantity: "
-        << book.best_ask_level().total_quantity()
-        << '\n';
-
-    std::cout
-        << "Next order ID: "
-        << book.best_ask_level().front().id
-        << '\n';
-
-    std::cout
-        << "Next order remaining quantity: "
-        << book.best_ask_level().front().remaining_quantity
-        << '\n';
+    if (book.has_asks()) {
+        std::cout
+            << "Remaining best ask: "
+            << book.best_ask()
+            << " x "
+            << book.best_ask_level().total_quantity()
+            << '\n';
+    }
 
     return 0;
 }
