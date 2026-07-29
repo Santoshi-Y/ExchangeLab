@@ -42,14 +42,16 @@ public:
         return orders_.front();
     }
 
-    void fill_front(Quantity quantity) {
-        auto& order = orders_.front();
+    void fill_front(Quantity requested_quantity) {
+        Order& order = orders_.front();
 
-        Quantity filled =
-            std::min(quantity, order.remaining_quantity);
+        const Quantity filled_quantity = std::min(
+            requested_quantity,
+            order.remaining_quantity
+        );
 
-        order.remaining_quantity -= filled;
-        total_quantity_ -= filled;
+        order.remaining_quantity -= filled_quantity;
+        total_quantity_ -= filled_quantity;
 
         if (order.remaining_quantity == 0) {
             orders_.pop_front();
@@ -62,4 +64,4 @@ private:
     std::deque<Order> orders_;
 };
 
-} // namespace exchange
+}  // namespace exchange
