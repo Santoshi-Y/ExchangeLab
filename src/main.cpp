@@ -33,29 +33,25 @@ int main() {
         .side = exchange::Side::Sell,
         .type = exchange::OrderType::Limit,
         .time_in_force = exchange::TimeInForce::GoodTillCancel,
-        .price = 106,
-        .initial_quantity = 8,
-        .remaining_quantity = 8,
+        .price = 108,
+        .initial_quantity = 12,
+        .remaining_quantity = 12,
         .timestamp = 3
     });
 
-    std::cout << "Bid Levels\n";
+    book.add_order({
+        .id = 4,
+        .side = exchange::Side::Sell,
+        .type = exchange::OrderType::Limit,
+        .time_in_force = exchange::TimeInForce::GoodTillCancel,
+        .price = 106,
+        .initial_quantity = 8,
+        .remaining_quantity = 8,
+        .timestamp = 4
+    });
 
-    for (const auto& [price, level] : book.bids()) {
-        std::cout << price
-                  << " -> "
-                  << level.total_quantity()
-                  << '\n';
-    }
-
-    std::cout << "\nAsk Levels\n";
-
-    for (const auto& [price, level] : book.asks()) {
-        std::cout << price
-                  << " -> "
-                  << level.total_quantity()
-                  << '\n';
-    }
+    std::cout << "Best Bid: " << book.best_bid() << '\n';
+    std::cout << "Best Ask: " << book.best_ask() << '\n';
 
     return 0;
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <map>
 
 #include "exchange/price_level.hpp"
@@ -13,7 +14,12 @@ public:
             auto it = bids_.find(order.price);
 
             if (it == bids_.end()) {
-                it = bids_.emplace(order.price, PriceLevel(order.price)).first;
+                it = bids_
+                         .emplace(
+                             order.price,
+                             PriceLevel{order.price}
+                         )
+                         .first;
             }
 
             it->second.add_order(order);
@@ -21,7 +27,12 @@ public:
             auto it = asks_.find(order.price);
 
             if (it == asks_.end()) {
-                it = asks_.emplace(order.price, PriceLevel(order.price)).first;
+                it = asks_
+                         .emplace(
+                             order.price,
+                             PriceLevel{order.price}
+                         )
+                         .first;
             }
 
             it->second.add_order(order);
@@ -30,6 +41,22 @@ public:
 
     [[nodiscard]] bool empty() const noexcept {
         return bids_.empty() && asks_.empty();
+    }
+
+    [[nodiscard]] bool has_bids() const noexcept {
+        return !bids_.empty();
+    }
+
+    [[nodiscard]] bool has_asks() const noexcept {
+        return !asks_.empty();
+    }
+
+    [[nodiscard]] Price best_bid() const {
+        return bids_.begin()->first;
+    }
+
+    [[nodiscard]] Price best_ask() const {
+        return asks_.begin()->first;
     }
 
     [[nodiscard]] const auto& bids() const noexcept {
@@ -45,4 +72,4 @@ private:
     std::map<Price, PriceLevel> asks_;
 };
 
-} // namespace exchange
+}  // namespace exchange
