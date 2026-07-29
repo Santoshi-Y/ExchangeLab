@@ -1,9 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 #include "exchange/price_level.hpp"
 
@@ -30,13 +33,28 @@ public:
             );
         }
 
+        if (order.type != OrderType::Limit) {
+            throw std::invalid_argument(
+                "Only limit orders may rest on the order book"
+            );
+        }
+
+        if (order.remaining_quantity <= 0) {
+            throw std::invalid_argument(
+                "Order quantity must be positive"
+            );
+        }
+
         const OrderId order_id = order.id;
         const Side side = order.side;
         const Price price = order.price;
 
         if (side == Side::Buy) {
-            auto [level_iterator, inserted] =
+            auto level_result =
                 bids_.try_emplace(price, price);
+
+            auto level_iterator =
+                level_result.first;
 
             auto order_iterator =
                 level_iterator->second.add_order(
@@ -55,8 +73,11 @@ public:
             return;
         }
 
-        auto [level_iterator, inserted] =
+        auto level_result =
             asks_.try_emplace(price, price);
+
+        auto level_iterator =
+            level_result.first;
 
         auto order_iterator =
             level_iterator->second.add_order(
@@ -73,16 +94,27 @@ public:
         );
     }
 
-    [[nodiscard]] bool cancel_order(OrderId order_id) {
+    [[nodiscard]] bool cancel_order(
+        OrderId order_id
+    ) {
+        return extract_order(order_id).has_value();
+    }
+
+    [[nodiscard]] std::optional<Order> extract_order(
+        OrderId order_id
+    ) {
         const auto location_iterator =
             order_locations_.find(order_id);
 
         if (location_iterator == order_locations_.end()) {
-            return false;
+            return std::nullopt;
         }
 
         const OrderLocation location =
             location_iterator->second;
+
+        Order extracted_order =
+            *location.order_iterator;
 
         if (location.side == Side::Buy) {
             auto level_iterator =
@@ -121,13 +153,40 @@ public:
         }
 
         order_locations_.erase(location_iterator);
-        return true;
+
+        return extracted_order;
     }
 
     [[nodiscard]] bool contains(
         OrderId order_id
     ) const noexcept {
         return order_locations_.contains(order_id);
+    }
+
+    [[nodiscard]] const Order* find_order(
+        OrderId order_id
+    ) const noexcept {
+        const auto location_iterator =
+            order_locations_.find(order_id);
+
+        if (location_iterator == order_locations_.end()) {
+            return nullptr;
+        }
+
+        return &*location_iterator->second.order_iterator;
+    }
+
+    [[nodiscard]] Order* find_order(
+        OrderId order_id
+    ) noexcept {
+        const auto location_iterator =
+            order_locations_.find(order_id);
+
+        if (location_iterator == order_locations_.end()) {
+            return nullptr;
+        }
+
+        return &*location_iterator->second.order_iterator;
     }
 
     [[nodiscard]] std::size_t order_count() const noexcept {

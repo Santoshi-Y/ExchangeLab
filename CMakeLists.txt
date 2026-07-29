@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(
     ExchangeLab
     VERSION 0.1.0
-    DESCRIPTION "A C++20 limit-order matching engine"
+    DESCRIPTION "A C++20 exchange matching engine"
     LANGUAGES CXX
 )
 
@@ -11,7 +11,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Header-only ExchangeLab library.
 add_library(exchange_lab_lib INTERFACE)
 
 target_include_directories(
@@ -26,7 +25,6 @@ target_compile_features(
         cxx_std_20
 )
 
-# Demo executable.
 add_executable(
     exchange_lab
     src/main.cpp
@@ -38,7 +36,6 @@ target_link_libraries(
         exchange_lab_lib
 )
 
-# Helpful compiler warnings.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
         exchange_lab
@@ -55,8 +52,11 @@ elseif(MSVC)
     )
 endif()
 
-# Testing is enabled by default.
-option(EXCHANGELAB_BUILD_TESTS "Build ExchangeLab tests" ON)
+option(
+    EXCHANGELAB_BUILD_TESTS
+    "Build ExchangeLab tests"
+    ON
+)
 
 if(EXCHANGELAB_BUILD_TESTS)
     include(CTest)
@@ -78,6 +78,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/price_level_test.cpp
         tests/order_book_test.cpp
         tests/matching_engine_test.cpp
+        tests/order_replace_test.cpp
     )
 
     target_link_libraries(
