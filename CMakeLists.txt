@@ -16,6 +16,7 @@ include(FetchContent)
 add_library(
     exchange_lab_lib
     src/tcp_server.cpp
+    src/exchange_server.cpp
 )
 
 target_include_directories(
@@ -106,6 +107,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/order_replace_test.cpp
         tests/protocol_test.cpp
         tests/tcp_server_test.cpp
+        tests/exchange_server_test.cpp
     )
 
     target_link_libraries(

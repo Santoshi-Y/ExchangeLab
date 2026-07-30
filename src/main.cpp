@@ -1,84 +1,30 @@
+#include <cstdint>
 #include <iostream>
 
-#include "exchange/matching_engine.hpp"
+#include "exchange/exchange_server.hpp"
 
 int main() {
-    exchange::OrderBook book;
-    exchange::MatchingEngine engine;
+    constexpr std::uint16_t port = 9000;
 
-    engine.process_order(
-        book,
-        {
-            .id = 1,
-            .side = exchange::Side::Buy,
-            .type = exchange::OrderType::Limit,
-            .time_in_force =
-                exchange::TimeInForce::GoodTillCancel,
-            .price = 100,
-            .initial_quantity = 20,
-            .remaining_quantity = 20,
-            .timestamp = 1
-        }
-    );
+    exchange::ExchangeServer server(port);
 
-    engine.process_order(
-        book,
-        {
-            .id = 2,
-            .side = exchange::Side::Sell,
-            .type = exchange::OrderType::Limit,
-            .time_in_force =
-                exchange::TimeInForce::GoodTillCancel,
-            .price = 105,
-            .initial_quantity = 15,
-            .remaining_quantity = 15,
-            .timestamp = 2
-        }
-    );
-
-    std::cout << "ExchangeLab Cancel/Replace Demo\n";
-    std::cout << "===============================\n";
-
-    std::cout
-        << "Original order 1: buy 20 @ 100\n";
-
-    const exchange::ReplaceResult result =
-        engine.replace_order(
-            book,
-            1,
-            105,
-            20,
-            3
-        );
-
-    std::cout
-        << "Replace order 1 with buy 20 @ 105: "
-        << (result.replaced ? "successful" : "not found")
-        << '\n';
-
-    for (const exchange::Trade& trade : result.trades) {
-        std::cout
-            << "Trade: "
-            << trade.quantity
-            << " units at "
-            << trade.price
+    if (!server.start()) {
+        std::cerr
+            << "Failed to start exchange server on port "
+            << port
             << '\n';
+
+        return 1;
     }
 
-    const exchange::Order* remaining =
-        book.find_order(1);
+    std::cout
+        << "ExchangeLab listening on port "
+        << port
+        << "...\n";
 
-    if (remaining != nullptr) {
-        std::cout
-            << "Remaining replaced order: "
-            << remaining->remaining_quantity
-            << " units at "
-            << remaining->price
-            << '\n';
-    } else {
-        std::cout
-            << "Replacement was completely filled.\n";
-    }
+    server.run();
+
+    std::cout << "Client disconnected.\n";
 
     return 0;
 }
