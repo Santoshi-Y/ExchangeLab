@@ -11,19 +11,40 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(exchange_lab_lib INTERFACE)
+include(FetchContent)
+
+add_library(
+    exchange_lab_lib
+    src/tcp_server.cpp
+)
 
 target_include_directories(
     exchange_lab_lib
-    INTERFACE
+    PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_compile_features(
     exchange_lab_lib
-    INTERFACE
+    PUBLIC
         cxx_std_20
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+        exchange_lab_lib
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+elseif(MSVC)
+    target_compile_options(
+        exchange_lab_lib
+        PRIVATE
+            /W4
+    )
+endif()
 
 add_executable(
     exchange_lab
@@ -64,8 +85,6 @@ option(
     ON
 )
 
-include(FetchContent)
-
 if(EXCHANGELAB_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -86,6 +105,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/matching_engine_test.cpp
         tests/order_replace_test.cpp
         tests/protocol_test.cpp
+        tests/tcp_server_test.cpp
     )
 
     target_link_libraries(
@@ -169,7 +189,7 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
                 -Wall
                 -Wextra
                 -Wpedantic
-    )
+        )
     elseif(MSVC)
         target_compile_options(
             exchange_lab_benchmarks
