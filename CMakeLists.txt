@@ -85,6 +85,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/order_book_test.cpp
         tests/matching_engine_test.cpp
         tests/order_replace_test.cpp
+        tests/protocol_test.cpp
     )
 
     target_link_libraries(
