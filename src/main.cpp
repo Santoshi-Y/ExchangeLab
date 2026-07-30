@@ -24,7 +24,8 @@ int main() {
 
     server.run();
 
-    std::cout << "Client disconnected.\n";
+    std::cout
+        << "ExchangeLab stopped.\n";
 
     return 0;
 }

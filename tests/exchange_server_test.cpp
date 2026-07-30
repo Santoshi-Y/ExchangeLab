@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <thread>
 #include <vector>
@@ -16,6 +18,8 @@
 #include "exchange/protocol.hpp"
 
 namespace {
+
+using namespace std::chrono_literals;
 
 bool send_all(
     int socket,
@@ -68,47 +72,62 @@ bool receive_exact(
 }
 
 int connect_to_server(std::uint16_t port) {
-    const int client_socket =
-        ::socket(AF_INET, SOCK_STREAM, 0);
+    for (int attempt = 0;
+         attempt < 50;
+         ++attempt) {
 
-    if (client_socket < 0) {
-        return -1;
+        const int socket =
+            ::socket(AF_INET, SOCK_STREAM, 0);
+
+        if (socket < 0) {
+            return -1;
+        }
+
+        sockaddr_in address {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+
+        if (::inet_pton(
+                AF_INET,
+                "127.0.0.1",
+                &address.sin_addr
+            ) != 1) {
+
+            ::close(socket);
+            return -1;
+        }
+
+        if (::connect(
+                socket,
+                reinterpret_cast<sockaddr*>(
+                    &address
+                ),
+                sizeof(address)
+            ) == 0) {
+
+            return socket;
+        }
+
+        ::close(socket);
+        std::this_thread::sleep_for(10ms);
     }
 
-    sockaddr_in address {};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-
-    if (::inet_pton(
-            AF_INET,
-            "127.0.0.1",
-            &address.sin_addr
-        ) != 1) {
-
-        ::close(client_socket);
-        return -1;
-    }
-
-    if (::connect(
-            client_socket,
-            reinterpret_cast<sockaddr*>(&address),
-            sizeof(address)
-        ) != 0) {
-
-        ::close(client_socket);
-        return -1;
-    }
-
-    return client_socket;
+    return -1;
 }
 
-template <std::size_t HeaderSize, std::size_t BodySize>
+template <
+    std::size_t HeaderSize,
+    std::size_t BodySize
+>
 std::vector<std::byte> combine_message(
     const std::array<std::byte, HeaderSize>& header,
     const std::array<std::byte, BodySize>& body
 ) {
     std::vector<std::byte> message;
-    message.reserve(HeaderSize + BodySize);
+
+    message.reserve(
+        HeaderSize + BodySize
+    );
 
     message.insert(
         message.end(),
@@ -125,9 +144,93 @@ std::vector<std::byte> combine_message(
     return message;
 }
 
+bool send_order(
+    int socket,
+    const exchange::protocol::NewOrderRequest& request,
+    std::uint64_t sequence_number
+) {
+    const auto body =
+        exchange::protocol::encode_new_order(
+            request
+        );
+
+    const exchange::protocol::MessageHeader header {
+        .magic =
+            exchange::protocol::protocol_magic,
+        .version =
+            exchange::protocol::protocol_version,
+        .type =
+            exchange::protocol::MessageType::NewOrder,
+        .body_size =
+            static_cast<std::uint32_t>(
+                body.size()
+            ),
+        .sequence_number = sequence_number
+    };
+
+    const auto encoded_header =
+        exchange::protocol::encode_header(header);
+
+    const std::vector<std::byte> message =
+        combine_message(
+            encoded_header,
+            body
+        );
+
+    return send_all(socket, message);
+}
+
+std::optional<exchange::protocol::OrderResponse>
+receive_order_response(int socket) {
+    std::array<
+        std::byte,
+        exchange::protocol::header_size
+    > header_bytes {};
+
+    if (!receive_exact(socket, header_bytes)) {
+        return std::nullopt;
+    }
+
+    const auto header =
+        exchange::protocol::decode_header(
+            header_bytes
+        );
+
+    if (!header) {
+        return std::nullopt;
+    }
+
+    if (header->body_size !=
+        exchange::protocol::
+            order_response_body_size) {
+
+        return std::nullopt;
+    }
+
+    std::array<
+        std::byte,
+        exchange::protocol::
+            order_response_body_size
+    > body_bytes {};
+
+    if (!receive_exact(socket, body_bytes)) {
+        return std::nullopt;
+    }
+
+    return exchange::protocol::
+        decode_order_response(body_bytes);
+}
+
+void close_client(int socket) {
+    if (socket >= 0) {
+        ::shutdown(socket, SHUT_RDWR);
+        ::close(socket);
+    }
+}
+
 TEST(
     ExchangeServerTest,
-    AcceptsBinaryNewOrder
+    AcceptsOrdersFromTwoClients
 ) {
     constexpr std::uint16_t port = 19001;
 
@@ -139,108 +242,179 @@ TEST(
         server.run();
     });
 
-    const int client_socket =
+    const int buyer_socket =
         connect_to_server(port);
 
-    ASSERT_GE(client_socket, 0);
+    const int seller_socket =
+        connect_to_server(port);
 
-    const exchange::protocol::NewOrderRequest request {
-        .order_id = 1001,
-        .timestamp = 500,
-        .price = 105,
-        .quantity = 20,
-        .side = exchange::protocol::Side::Buy,
-        .order_type =
-            exchange::protocol::OrderType::Limit
-    };
+    ASSERT_GE(buyer_socket, 0);
+    ASSERT_GE(seller_socket, 0);
 
-    const auto request_body =
-        exchange::protocol::encode_new_order(request);
+    const exchange::protocol::NewOrderRequest
+        sell_order {
+            .order_id = 2001,
+            .timestamp = 1,
+            .price = 100,
+            .quantity = 10,
+            .side =
+                exchange::protocol::Side::Sell,
+            .order_type =
+                exchange::protocol::OrderType::Limit
+        };
 
-    const exchange::protocol::MessageHeader request_header {
-        .magic =
-            exchange::protocol::protocol_magic,
-        .version =
-            exchange::protocol::protocol_version,
-        .type =
-            exchange::protocol::MessageType::NewOrder,
-        .body_size = static_cast<std::uint32_t>(
-            request_body.size()
-        ),
-        .sequence_number = 1
-    };
-
-    const auto encoded_header =
-        exchange::protocol::encode_header(
-            request_header
-        );
-
-    const std::vector<std::byte> request_message =
-        combine_message(
-            encoded_header,
-            request_body
-        );
+    const exchange::protocol::NewOrderRequest
+        buy_order {
+            .order_id = 2002,
+            .timestamp = 2,
+            .price = 100,
+            .quantity = 10,
+            .side =
+                exchange::protocol::Side::Buy,
+            .order_type =
+                exchange::protocol::OrderType::Limit
+        };
 
     ASSERT_TRUE(
-        send_all(client_socket, request_message)
-    );
-
-    std::array<
-        std::byte,
-        exchange::protocol::header_size
-    > response_header_bytes {};
-
-    ASSERT_TRUE(
-        receive_exact(
-            client_socket,
-            response_header_bytes
+        send_order(
+            seller_socket,
+            sell_order,
+            1
         )
     );
 
-    const auto response_header =
-        exchange::protocol::decode_header(
-            response_header_bytes
-        );
+    const auto seller_response =
+        receive_order_response(seller_socket);
 
-    ASSERT_TRUE(response_header.has_value());
+    ASSERT_TRUE(seller_response.has_value());
 
     EXPECT_EQ(
-        response_header->type,
-        exchange::protocol::MessageType::OrderAccepted
+        seller_response->order_id,
+        2001
     );
 
     EXPECT_EQ(
-        response_header->body_size,
-        exchange::protocol::order_response_body_size
+        seller_response->success,
+        1
     );
-
-    std::array<
-        std::byte,
-        exchange::protocol::order_response_body_size
-    > response_body_bytes {};
 
     ASSERT_TRUE(
-        receive_exact(
-            client_socket,
-            response_body_bytes
+        send_order(
+            buyer_socket,
+            buy_order,
+            2
         )
     );
 
-    const auto response =
-        exchange::protocol::decode_order_response(
-            response_body_bytes
-        );
+    const auto buyer_response =
+        receive_order_response(buyer_socket);
 
-    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(buyer_response.has_value());
 
-    EXPECT_EQ(response->order_id, 1001);
-    EXPECT_EQ(response->success, 1);
+    EXPECT_EQ(
+        buyer_response->order_id,
+        2002
+    );
 
-    ::shutdown(client_socket, SHUT_RDWR);
-    ::close(client_socket);
+    EXPECT_EQ(
+        buyer_response->success,
+        1
+    );
 
-    server_thread.join();
+    close_client(buyer_socket);
+    close_client(seller_socket);
+
     server.stop();
+    server_thread.join();
+}
+
+TEST(
+    ExchangeServerTest,
+    RoutesResponsesToCorrectClient
+) {
+    constexpr std::uint16_t port = 19002;
+
+    exchange::ExchangeServer server(port);
+
+    ASSERT_TRUE(server.start());
+
+    std::thread server_thread([&server]() {
+        server.run();
+    });
+
+    const int first_socket =
+        connect_to_server(port);
+
+    const int second_socket =
+        connect_to_server(port);
+
+    ASSERT_GE(first_socket, 0);
+    ASSERT_GE(second_socket, 0);
+
+    const exchange::protocol::NewOrderRequest
+        first_order {
+            .order_id = 3001,
+            .timestamp = 1,
+            .price = 99,
+            .quantity = 5,
+            .side =
+                exchange::protocol::Side::Buy,
+            .order_type =
+                exchange::protocol::OrderType::Limit
+        };
+
+    const exchange::protocol::NewOrderRequest
+        second_order {
+            .order_id = 3002,
+            .timestamp = 2,
+            .price = 101,
+            .quantity = 5,
+            .side =
+                exchange::protocol::Side::Sell,
+            .order_type =
+                exchange::protocol::OrderType::Limit
+        };
+
+    ASSERT_TRUE(
+        send_order(
+            first_socket,
+            first_order,
+            1
+        )
+    );
+
+    ASSERT_TRUE(
+        send_order(
+            second_socket,
+            second_order,
+            2
+        )
+    );
+
+    const auto first_response =
+        receive_order_response(first_socket);
+
+    const auto second_response =
+        receive_order_response(second_socket);
+
+    ASSERT_TRUE(first_response.has_value());
+    ASSERT_TRUE(second_response.has_value());
+
+    EXPECT_EQ(
+        first_response->order_id,
+        3001
+    );
+
+    EXPECT_EQ(
+        second_response->order_id,
+        3002
+    );
+
+    close_client(first_socket);
+    close_client(second_socket);
+
+    server.stop();
+    server_thread.join();
 }
 
 }  // namespace

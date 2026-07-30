@@ -17,7 +17,8 @@ namespace exchange {
 
 namespace {
 
-constexpr std::size_t maximum_body_size = 1024 * 1024;
+constexpr std::size_t maximum_body_size =
+    1024U * 1024U;
 
 Side convert_side(protocol::Side side) {
     switch (side) {
@@ -45,13 +46,19 @@ OrderType convert_order_type(
     return OrderType::Limit;
 }
 
-template <std::size_t HeaderSize, std::size_t BodySize>
+template <
+    std::size_t HeaderSize,
+    std::size_t BodySize
+>
 std::vector<std::byte> combine_message(
     const std::array<std::byte, HeaderSize>& header,
     const std::array<std::byte, BodySize>& body
 ) {
     std::vector<std::byte> message;
-    message.reserve(HeaderSize + BodySize);
+
+    message.reserve(
+        HeaderSize + BodySize
+    );
 
     message.insert(
         message.end(),
@@ -72,87 +79,195 @@ std::vector<std::byte> combine_message(
 
 ExchangeServer::ExchangeServer(std::uint16_t port)
     : server_(port),
+      running_(false),
       next_sequence_number_(1) {}
 
+ExchangeServer::~ExchangeServer() {
+    stop();
+}
+
 bool ExchangeServer::start() {
-    return server_.start();
+    if (!server_.start()) {
+        return false;
+    }
+
+    running_.store(true);
+    return true;
 }
 
 void ExchangeServer::run() {
-    if (!server_.accept_client()) {
-        std::cerr << "Failed to accept client\n";
+    while (running_.load()) {
+        const int client_socket =
+            server_.accept_connection();
+
+        if (client_socket < 0) {
+            if (running_.load()) {
+                std::cerr
+                    << "Failed to accept client\n";
+            }
+
+            break;
+        }
+
+        register_client(client_socket);
+
+        std::cout
+            << "Client connected on socket "
+            << client_socket
+            << '\n';
+
+        std::lock_guard<std::mutex> lock(
+            threads_mutex_
+        );
+
+        client_threads_.emplace_back(
+            &ExchangeServer::handle_client,
+            this,
+            client_socket
+        );
+    }
+
+    std::vector<std::thread> threads;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            threads_mutex_
+        );
+
+        threads.swap(client_threads_);
+    }
+
+    for (std::thread& thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
+
+void ExchangeServer::stop() {
+    const bool was_running =
+        running_.exchange(false);
+
+    if (!was_running) {
         return;
     }
 
-    while (true) {
+    server_.stop();
+
+    std::vector<int> sockets;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            clients_mutex_
+        );
+
+        sockets = client_sockets_;
+    }
+
+    for (const int socket : sockets) {
+        TcpServer::close_connection(socket);
+    }
+}
+
+void ExchangeServer::handle_client(
+    int client_socket
+) {
+    std::vector<std::byte> receive_buffer;
+
+    while (running_.load()) {
         const std::vector<std::byte> bytes =
-            server_.receive();
+            TcpServer::receive_from(client_socket);
 
         if (bytes.empty()) {
             break;
         }
 
-        receive_buffer_.insert(
-            receive_buffer_.end(),
+        receive_buffer.insert(
+            receive_buffer.end(),
             bytes.begin(),
             bytes.end()
         );
 
-        process_receive_buffer();
+        process_receive_buffer(
+            client_socket,
+            receive_buffer
+        );
     }
+
+    unregister_client(client_socket);
+    TcpServer::close_connection(client_socket);
+
+    std::cout
+        << "Client disconnected from socket "
+        << client_socket
+        << '\n';
 }
 
-void ExchangeServer::stop() {
-    server_.stop();
-}
-
-void ExchangeServer::process_receive_buffer() {
-    while (receive_buffer_.size() >=
+void ExchangeServer::process_receive_buffer(
+    int client_socket,
+    std::vector<std::byte>& receive_buffer
+) {
+    while (receive_buffer.size() >=
            protocol::header_size) {
 
-        const std::span<const std::byte> header_bytes {
-            receive_buffer_.data(),
-            protocol::header_size
-        };
+        const std::span<const std::byte>
+            header_bytes {
+                receive_buffer.data(),
+                protocol::header_size
+            };
 
         const auto header =
-            protocol::decode_header(header_bytes);
+            protocol::decode_header(
+                header_bytes
+            );
 
         if (!header) {
-            std::cerr << "Invalid protocol header\n";
-            receive_buffer_.clear();
+            std::cerr
+                << "Invalid protocol header\n";
+
+            receive_buffer.clear();
             return;
         }
 
-        if (header->body_size > maximum_body_size) {
-            std::cerr << "Message body is too large\n";
-            receive_buffer_.clear();
+        if (header->body_size >
+            maximum_body_size) {
+
+            std::cerr
+                << "Message body is too large\n";
+
+            receive_buffer.clear();
             return;
         }
 
         const std::size_t full_message_size =
             protocol::header_size +
-            static_cast<std::size_t>(header->body_size);
+            static_cast<std::size_t>(
+                header->body_size
+            );
 
-        if (receive_buffer_.size() <
+        if (receive_buffer.size() <
             full_message_size) {
 
             return;
         }
 
         const std::span<const std::byte> body {
-            receive_buffer_.data() +
+            receive_buffer.data() +
                 protocol::header_size,
             static_cast<std::size_t>(
                 header->body_size
             )
         };
 
-        handle_message(*header, body);
+        handle_message(
+            client_socket,
+            *header,
+            body
+        );
 
-        receive_buffer_.erase(
-            receive_buffer_.begin(),
-            receive_buffer_.begin() +
+        receive_buffer.erase(
+            receive_buffer.begin(),
+            receive_buffer.begin() +
                 static_cast<std::ptrdiff_t>(
                     full_message_size
                 )
@@ -161,12 +276,17 @@ void ExchangeServer::process_receive_buffer() {
 }
 
 void ExchangeServer::handle_message(
+    int client_socket,
     const protocol::MessageHeader& header,
     std::span<const std::byte> body
 ) {
     switch (header.type) {
         case protocol::MessageType::NewOrder:
-            handle_new_order(header, body);
+            handle_new_order(
+                client_socket,
+                header,
+                body
+            );
             break;
 
         case protocol::MessageType::CancelOrder:
@@ -183,16 +303,19 @@ void ExchangeServer::handle_message(
 }
 
 void ExchangeServer::handle_new_order(
+    int client_socket,
     const protocol::MessageHeader& header,
     std::span<const std::byte> body
 ) {
     if (header.body_size !=
         protocol::new_order_body_size) {
 
-        std::cerr
-            << "Invalid new-order body size\n";
+        send_order_response(
+            client_socket,
+            0,
+            false
+        );
 
-        send_order_response(0, false);
         return;
     }
 
@@ -200,21 +323,9 @@ void ExchangeServer::handle_new_order(
         protocol::decode_new_order(body);
 
     if (!request) {
-        std::cerr
-            << "Could not decode new order\n";
-
-        send_order_response(0, false);
-        return;
-    }
-
-    if (book_.find_order(request->order_id) != nullptr) {
-        std::cerr
-            << "Duplicate order ID: "
-            << request->order_id
-            << '\n';
-
         send_order_response(
-            request->order_id,
+            client_socket,
+            0,
             false
         );
 
@@ -227,6 +338,7 @@ void ExchangeServer::handle_new_order(
         )) {
 
         send_order_response(
+            client_socket,
             request->order_id,
             false
         );
@@ -235,82 +347,107 @@ void ExchangeServer::handle_new_order(
     }
 
     const Quantity quantity =
-        static_cast<Quantity>(request->quantity);
+        static_cast<Quantity>(
+            request->quantity
+        );
 
-    const Order order {
-        .id = request->order_id,
-        .side = convert_side(request->side),
-        .type =
-            convert_order_type(request->order_type),
-        .time_in_force =
-            TimeInForce::GoodTillCancel,
-        .price = request->price,
-        .initial_quantity = quantity,
-        .remaining_quantity = quantity,
-        .timestamp = request->timestamp
-    };
+    bool accepted = false;
 
-    engine_.process_order(book_, order);
+    {
+        // Only one thread may modify the shared
+        // order book and matching engine at a time.
+        std::lock_guard<std::mutex> lock(
+            engine_mutex_
+        );
 
-    std::cout
-        << "Accepted order "
-        << request->order_id
-        << ": "
-        << (request->side == protocol::Side::Buy
-                ? "BUY "
-                : "SELL ")
-        << request->quantity;
+        if (book_.find_order(
+                request->order_id
+            ) == nullptr) {
 
-    if (request->order_type ==
-        protocol::OrderType::Limit) {
+            const Order order {
+                .id = request->order_id,
+                .side =
+                    convert_side(request->side),
+                .type =
+                    convert_order_type(
+                        request->order_type
+                    ),
+                .time_in_force =
+                    TimeInForce::GoodTillCancel,
+                .price = request->price,
+                .initial_quantity = quantity,
+                .remaining_quantity = quantity,
+                .timestamp = request->timestamp
+            };
 
-        std::cout << " @ " << request->price;
-    } else {
-        std::cout << " MARKET";
+            engine_.process_order(book_, order);
+            accepted = true;
+        }
     }
 
-    std::cout << '\n';
+    if (accepted) {
+        std::cout
+            << "Accepted order "
+            << request->order_id
+            << " from socket "
+            << client_socket
+            << '\n';
+    } else {
+        std::cerr
+            << "Rejected duplicate order ID "
+            << request->order_id
+            << '\n';
+    }
 
     send_order_response(
+        client_socket,
         request->order_id,
-        true
+        accepted
     );
 }
 
 void ExchangeServer::send_order_response(
+    int client_socket,
     std::uint64_t order_id,
     bool success
 ) {
     const std::uint64_t sequence_number =
-        next_sequence_number_++;
+        next_sequence_number_.fetch_add(1);
 
     const protocol::OrderResponse response {
         .order_id = order_id,
         .sequence_number = sequence_number,
-        .success =
-            static_cast<std::uint8_t>(
-                success ? 1 : 0
-            )
+        .success = static_cast<std::uint8_t>(
+            success ? 1 : 0
+        )
     };
 
     const auto response_body =
-        protocol::encode_order_response(response);
+        protocol::encode_order_response(
+            response
+        );
 
     const protocol::MessageHeader response_header {
         .magic = protocol::protocol_magic,
-        .version = protocol::protocol_version,
+        .version =
+            protocol::protocol_version,
         .type =
             success
-                ? protocol::MessageType::OrderAccepted
-                : protocol::MessageType::OrderRejected,
-        .body_size = static_cast<std::uint32_t>(
-            response_body.size()
-        ),
+                ? protocol::MessageType::
+                    OrderAccepted
+                : protocol::MessageType::
+                    OrderRejected,
+        .body_size =
+            static_cast<std::uint32_t>(
+                response_body.size()
+            ),
         .sequence_number = sequence_number
     };
 
     const auto encoded_header =
-        protocol::encode_header(response_header);
+        protocol::encode_header(
+            response_header
+        );
 
     const std::vector<std::byte> message =
         combine_message(
@@ -318,9 +455,43 @@ void ExchangeServer::send_order_response(
             response_body
         );
 
-    if (!server_.send(message)) {
+    if (!TcpServer::send_to(
+            client_socket,
+            message
+        )) {
+
         std::cerr
-            << "Failed to send order response\n";
+            << "Failed to send response to socket "
+            << client_socket
+            << '\n';
+    }
+}
+
+void ExchangeServer::register_client(
+    int client_socket
+) {
+    std::lock_guard<std::mutex> lock(
+        clients_mutex_
+    );
+
+    client_sockets_.push_back(client_socket);
+}
+
+void ExchangeServer::unregister_client(
+    int client_socket
+) {
+    std::lock_guard<std::mutex> lock(
+        clients_mutex_
+    );
+
+    const auto position = std::find(
+        client_sockets_.begin(),
+        client_sockets_.end(),
+        client_socket
+    );
+
+    if (position != client_sockets_.end()) {
+        client_sockets_.erase(position);
     }
 }
 

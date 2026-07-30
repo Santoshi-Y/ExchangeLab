@@ -13,6 +13,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
 
+find_package(Threads REQUIRED)
+
 add_library(
     exchange_lab_lib
     src/tcp_server.cpp
@@ -29,6 +31,12 @@ target_compile_features(
     exchange_lab_lib
     PUBLIC
         cxx_std_20
+)
+
+target_link_libraries(
+    exchange_lab_lib
+    PUBLIC
+        Threads::Threads
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -115,6 +123,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         PRIVATE
             exchange_lab_lib
             GTest::gtest_main
+            Threads::Threads
     )
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -182,6 +191,7 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
         PRIVATE
             exchange_lab_lib
             benchmark::benchmark_main
+            Threads::Threads
     )
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
