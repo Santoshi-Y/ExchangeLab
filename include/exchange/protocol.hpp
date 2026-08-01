@@ -91,10 +91,11 @@ void write_integer(
     const auto unsigned_value =
         static_cast<Unsigned>(value);
 
-    for (std::size_t index = 0;
-         index < sizeof(Integer);
-         ++index) {
-
+    for (
+        std::size_t index = 0;
+        index < sizeof(Integer);
+        ++index
+    ) {
         output[offset++] = static_cast<std::byte>(
             (unsigned_value >> (index * 8U)) & 0xFFU
         );
@@ -115,10 +116,11 @@ std::optional<Integer> read_integer(
 
     Unsigned value = 0;
 
-    for (std::size_t index = 0;
-         index < sizeof(Integer);
-         ++index) {
-
+    for (
+        std::size_t index = 0;
+        index < sizeof(Integer);
+        ++index
+    ) {
         const auto byte_value =
             std::to_integer<Unsigned>(input[offset++]);
 
@@ -177,32 +179,49 @@ inline std::optional<MessageHeader> decode_header(
     std::size_t offset = 0;
 
     const auto magic =
-        detail::read_integer<std::uint32_t>(input, offset);
+        detail::read_integer<std::uint32_t>(
+            input,
+            offset
+        );
 
     const auto version =
-        detail::read_integer<std::uint16_t>(input, offset);
+        detail::read_integer<std::uint16_t>(
+            input,
+            offset
+        );
 
     const auto type =
-        detail::read_integer<std::uint16_t>(input, offset);
+        detail::read_integer<std::uint16_t>(
+            input,
+            offset
+        );
 
     const auto body_size =
-        detail::read_integer<std::uint32_t>(input, offset);
+        detail::read_integer<std::uint32_t>(
+            input,
+            offset
+        );
 
     const auto sequence_number =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
-    if (!magic ||
+    if (
+        !magic ||
         !version ||
         !type ||
         !body_size ||
-        !sequence_number) {
-
+        !sequence_number
+    ) {
         return std::nullopt;
     }
 
-    if (*magic != protocol_magic ||
-        *version != protocol_version) {
-
+    if (
+        *magic != protocol_magic ||
+        *version != protocol_version
+    ) {
         return std::nullopt;
     }
 
@@ -255,7 +274,9 @@ encode_new_order(
     detail::write_integer(
         output,
         offset,
-        static_cast<std::uint8_t>(request.order_type)
+        static_cast<std::uint8_t>(
+            request.order_type
+        )
     );
 
     return output;
@@ -271,44 +292,65 @@ inline std::optional<NewOrderRequest> decode_new_order(
     std::size_t offset = 0;
 
     const auto order_id =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
     const auto timestamp =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
     const auto price =
-        detail::read_integer<std::int64_t>(input, offset);
+        detail::read_integer<std::int64_t>(
+            input,
+            offset
+        );
 
     const auto quantity =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
     const auto side =
-        detail::read_integer<std::uint8_t>(input, offset);
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
 
     const auto order_type =
-        detail::read_integer<std::uint8_t>(input, offset);
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
 
-    if (!order_id ||
+    if (
+        !order_id ||
         !timestamp ||
         !price ||
         !quantity ||
         !side ||
-        !order_type) {
-
+        !order_type
+    ) {
         return std::nullopt;
     }
 
-    if (*side != static_cast<std::uint8_t>(Side::Buy) &&
-        *side != static_cast<std::uint8_t>(Side::Sell)) {
-
+    if (
+        *side != static_cast<std::uint8_t>(Side::Buy) &&
+        *side != static_cast<std::uint8_t>(Side::Sell)
+    ) {
         return std::nullopt;
     }
 
-    if (*order_type !=
+    if (
+        *order_type !=
             static_cast<std::uint8_t>(OrderType::Limit) &&
         *order_type !=
-            static_cast<std::uint8_t>(OrderType::Market)) {
-
+            static_cast<std::uint8_t>(OrderType::Market)
+    ) {
         return std::nullopt;
     }
 
@@ -331,7 +373,11 @@ inline std::array<std::byte, order_response_body_size>
 encode_order_response(
     const OrderResponse& response
 ) {
-    std::array<std::byte, order_response_body_size> output {};
+    std::array<
+        std::byte,
+        order_response_body_size
+    > output {};
+
     std::size_t offset = 0;
 
     detail::write_integer(
@@ -355,7 +401,8 @@ encode_order_response(
     return output;
 }
 
-inline std::optional<OrderResponse> decode_order_response(
+inline std::optional<OrderResponse>
+decode_order_response(
     std::span<const std::byte> input
 ) {
     if (input.size() != order_response_body_size) {
@@ -365,18 +412,28 @@ inline std::optional<OrderResponse> decode_order_response(
     std::size_t offset = 0;
 
     const auto order_id =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
     const auto sequence_number =
-        detail::read_integer<std::uint64_t>(input, offset);
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
 
     const auto success =
-        detail::read_integer<std::uint8_t>(input, offset);
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
 
-    if (!order_id ||
+    if (
+        !order_id ||
         !sequence_number ||
-        !success) {
-
+        !success
+    ) {
         return std::nullopt;
     }
 
@@ -388,6 +445,115 @@ inline std::optional<OrderResponse> decode_order_response(
         .order_id = *order_id,
         .sequence_number = *sequence_number,
         .success = *success
+    };
+}
+
+inline std::array<
+    std::byte,
+    trade_execution_body_size
+> encode_trade_execution(
+    const TradeExecution& execution
+) {
+    std::array<
+        std::byte,
+        trade_execution_body_size
+    > output {};
+
+    std::size_t offset = 0;
+
+    detail::write_integer(
+        output,
+        offset,
+        execution.buy_order_id
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        execution.sell_order_id
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        execution.price
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        execution.quantity
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        execution.sequence_number
+    );
+
+    return output;
+}
+
+inline std::optional<TradeExecution>
+decode_trade_execution(
+    std::span<const std::byte> input
+) {
+    if (input.size() != trade_execution_body_size) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = 0;
+
+    const auto buy_order_id =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    const auto sell_order_id =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    const auto price =
+        detail::read_integer<std::int64_t>(
+            input,
+            offset
+        );
+
+    const auto quantity =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    const auto sequence_number =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    if (
+        !buy_order_id ||
+        !sell_order_id ||
+        !price ||
+        !quantity ||
+        !sequence_number
+    ) {
+        return std::nullopt;
+    }
+
+    if (*quantity == 0) {
+        return std::nullopt;
+    }
+
+    return TradeExecution {
+        .buy_order_id = *buy_order_id,
+        .sell_order_id = *sell_order_id,
+        .price = *price,
+        .quantity = *quantity,
+        .sequence_number = *sequence_number
     };
 }
 

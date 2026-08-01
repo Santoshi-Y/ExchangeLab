@@ -6,12 +6,14 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "exchange/matching_engine.hpp"
 #include "exchange/order_book.hpp"
 #include "exchange/protocol.hpp"
 #include "exchange/tcp_server.hpp"
+#include "exchange/trade.hpp"
 
 namespace exchange {
 
@@ -34,6 +36,12 @@ public:
     void stop();
 
 private:
+    struct ExecutionDelivery {
+        Trade trade;
+        int buyer_socket;
+        int seller_socket;
+    };
+
     void handle_client(int client_socket);
 
     void process_receive_buffer(
@@ -59,6 +67,26 @@ private:
         bool success
     );
 
+    void send_trade_execution(
+        int client_socket,
+        const Trade& trade
+    );
+
+    void send_execution_deliveries(
+        const std::vector<ExecutionDelivery>& deliveries
+    );
+
+    [[nodiscard]] int find_order_owner(
+        OrderId order_id,
+        OrderId incoming_order_id,
+        int incoming_socket
+    ) const;
+
+    void remove_filled_order_owners(
+        const std::vector<Trade>& trades,
+        OrderId incoming_order_id
+    );
+
     void register_client(int client_socket);
 
     void unregister_client(int client_socket);
@@ -69,6 +97,10 @@ private:
     MatchingEngine engine_;
 
     std::mutex engine_mutex_;
+
+    std::unordered_map<OrderId, int> order_owners_;
+
+    std::mutex send_mutex_;
 
     std::mutex clients_mutex_;
     std::vector<int> client_sockets_;

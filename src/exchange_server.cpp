@@ -56,9 +56,7 @@ std::vector<std::byte> combine_message(
 ) {
     std::vector<std::byte> message;
 
-    message.reserve(
-        HeaderSize + BodySize
-    );
+    message.reserve(HeaderSize + BodySize);
 
     message.insert(
         message.end(),
@@ -207,9 +205,10 @@ void ExchangeServer::process_receive_buffer(
     int client_socket,
     std::vector<std::byte>& receive_buffer
 ) {
-    while (receive_buffer.size() >=
-           protocol::header_size) {
-
+    while (
+        receive_buffer.size() >=
+        protocol::header_size
+    ) {
         const std::span<const std::byte>
             header_bytes {
                 receive_buffer.data(),
@@ -217,9 +216,7 @@ void ExchangeServer::process_receive_buffer(
             };
 
         const auto header =
-            protocol::decode_header(
-                header_bytes
-            );
+            protocol::decode_header(header_bytes);
 
         if (!header) {
             std::cerr
@@ -229,9 +226,7 @@ void ExchangeServer::process_receive_buffer(
             return;
         }
 
-        if (header->body_size >
-            maximum_body_size) {
-
+        if (header->body_size > maximum_body_size) {
             std::cerr
                 << "Message body is too large\n";
 
@@ -245,9 +240,10 @@ void ExchangeServer::process_receive_buffer(
                 header->body_size
             );
 
-        if (receive_buffer.size() <
-            full_message_size) {
-
+        if (
+            receive_buffer.size() <
+            full_message_size
+        ) {
             return;
         }
 
@@ -307,9 +303,10 @@ void ExchangeServer::handle_new_order(
     const protocol::MessageHeader& header,
     std::span<const std::byte> body
 ) {
-    if (header.body_size !=
-        protocol::new_order_body_size) {
-
+    if (
+        header.body_size !=
+        protocol::new_order_body_size
+    ) {
         send_order_response(
             client_socket,
             0,
@@ -332,11 +329,12 @@ void ExchangeServer::handle_new_order(
         return;
     }
 
-    if (request->quantity >
+    if (
+        request->quantity >
         static_cast<std::uint64_t>(
             std::numeric_limits<Quantity>::max()
-        )) {
-
+        )
+    ) {
         send_order_response(
             client_socket,
             request->order_id,
@@ -353,17 +351,22 @@ void ExchangeServer::handle_new_order(
 
     bool accepted = false;
 
+    std::vector<ExecutionDelivery> deliveries;
+
     {
-        // Only one thread may modify the shared
-        // order book and matching engine at a time.
         std::lock_guard<std::mutex> lock(
             engine_mutex_
         );
 
-        if (book_.find_order(
+        const bool duplicate_order_id =
+            book_.find_order(
                 request->order_id
-            ) == nullptr) {
+            ) != nullptr ||
+            order_owners_.contains(
+                request->order_id
+            );
 
+        if (!duplicate_order_id) {
             const Order order {
                 .id = request->order_id,
                 .side =
@@ -380,8 +383,48 @@ void ExchangeServer::handle_new_order(
                 .timestamp = request->timestamp
             };
 
-            engine_.process_order(book_, order);
+            const std::vector<Trade> trades =
+                engine_.process_order(
+                    book_,
+                    order
+                );
+
             accepted = true;
+
+            deliveries.reserve(trades.size());
+
+            for (const Trade& trade : trades) {
+                deliveries.push_back({
+                    .trade = trade,
+                    .buyer_socket =
+                        find_order_owner(
+                            trade.buy_order_id,
+                            request->order_id,
+                            client_socket
+                        ),
+                    .seller_socket =
+                        find_order_owner(
+                            trade.sell_order_id,
+                            request->order_id,
+                            client_socket
+                        )
+                });
+            }
+
+            remove_filled_order_owners(
+                trades,
+                request->order_id
+            );
+
+            if (
+                book_.find_order(
+                    request->order_id
+                ) != nullptr
+            ) {
+                order_owners_[
+                    request->order_id
+                ] = client_socket;
+            }
         }
     }
 
@@ -404,6 +447,10 @@ void ExchangeServer::handle_new_order(
         request->order_id,
         accepted
     );
+
+    if (accepted) {
+        send_execution_deliveries(deliveries);
+    }
 }
 
 void ExchangeServer::send_order_response(
@@ -429,8 +476,7 @@ void ExchangeServer::send_order_response(
 
     const protocol::MessageHeader response_header {
         .magic = protocol::protocol_magic,
-        .version =
-            protocol::protocol_version,
+        .version = protocol::protocol_version,
         .type =
             success
                 ? protocol::MessageType::
@@ -455,15 +501,156 @@ void ExchangeServer::send_order_response(
             response_body
         );
 
-    if (!TcpServer::send_to(
+    std::lock_guard<std::mutex> send_lock(
+        send_mutex_
+    );
+
+    if (
+        !TcpServer::send_to(
             client_socket,
             message
-        )) {
-
+        )
+    ) {
         std::cerr
             << "Failed to send response to socket "
             << client_socket
             << '\n';
+    }
+}
+
+void ExchangeServer::send_trade_execution(
+    int client_socket,
+    const Trade& trade
+) {
+    if (client_socket < 0) {
+        return;
+    }
+
+    const std::uint64_t sequence_number =
+        next_sequence_number_.fetch_add(1);
+
+    const protocol::TradeExecution execution {
+        .buy_order_id = trade.buy_order_id,
+        .sell_order_id = trade.sell_order_id,
+        .price = static_cast<std::int64_t>(
+            trade.price
+        ),
+        .quantity =
+            static_cast<std::uint64_t>(
+                trade.quantity
+            ),
+        .sequence_number = sequence_number
+    };
+
+    const auto response_body =
+        protocol::encode_trade_execution(
+            execution
+        );
+
+    const protocol::MessageHeader response_header {
+        .magic = protocol::protocol_magic,
+        .version = protocol::protocol_version,
+        .type =
+            protocol::MessageType::TradeExecution,
+        .body_size =
+            static_cast<std::uint32_t>(
+                response_body.size()
+            ),
+        .sequence_number = sequence_number
+    };
+
+    const auto encoded_header =
+        protocol::encode_header(
+            response_header
+        );
+
+    const std::vector<std::byte> message =
+        combine_message(
+            encoded_header,
+            response_body
+        );
+
+    std::lock_guard<std::mutex> send_lock(
+        send_mutex_
+    );
+
+    if (
+        !TcpServer::send_to(
+            client_socket,
+            message
+        )
+    ) {
+        std::cerr
+            << "Failed to send execution to socket "
+            << client_socket
+            << '\n';
+    }
+}
+
+void ExchangeServer::send_execution_deliveries(
+    const std::vector<ExecutionDelivery>& deliveries
+) {
+    for (
+        const ExecutionDelivery& delivery :
+        deliveries
+    ) {
+        send_trade_execution(
+            delivery.buyer_socket,
+            delivery.trade
+        );
+
+        send_trade_execution(
+            delivery.seller_socket,
+            delivery.trade
+        );
+    }
+}
+
+int ExchangeServer::find_order_owner(
+    OrderId order_id,
+    OrderId incoming_order_id,
+    int incoming_socket
+) const {
+    if (order_id == incoming_order_id) {
+        return incoming_socket;
+    }
+
+    const auto owner =
+        order_owners_.find(order_id);
+
+    if (owner == order_owners_.end()) {
+        return -1;
+    }
+
+    return owner->second;
+}
+
+void ExchangeServer::remove_filled_order_owners(
+    const std::vector<Trade>& trades,
+    OrderId incoming_order_id
+) {
+    for (const Trade& trade : trades) {
+        if (
+            trade.buy_order_id != incoming_order_id &&
+            book_.find_order(
+                trade.buy_order_id
+            ) == nullptr
+        ) {
+            order_owners_.erase(
+                trade.buy_order_id
+            );
+        }
+
+        if (
+            trade.sell_order_id != incoming_order_id &&
+            book_.find_order(
+                trade.sell_order_id
+            ) == nullptr
+        ) {
+            order_owners_.erase(
+                trade.sell_order_id
+            );
+        }
     }
 }
 
