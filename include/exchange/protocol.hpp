@@ -21,7 +21,8 @@ enum class MessageType : std::uint16_t {
     OrderRejected = 101,
     OrderCancelled = 102,
     OrderReplaced = 103,
-    TradeExecution = 104
+    TradeExecution = 104,
+    BookUpdate = 105
 };
 
 enum class Side : std::uint8_t {
@@ -74,6 +75,18 @@ struct TradeExecution {
     std::uint64_t sell_order_id {};
     std::int64_t price {};
     std::uint64_t quantity {};
+    std::uint64_t sequence_number {};
+};
+
+struct BookUpdate {
+    std::uint8_t has_bid {};
+    std::int64_t best_bid {};
+    std::uint64_t bid_quantity {};
+
+    std::uint8_t has_ask {};
+    std::int64_t best_ask {};
+    std::uint64_t ask_quantity {};
+
     std::uint64_t sequence_number {};
 };
 
@@ -138,6 +151,7 @@ constexpr std::size_t cancel_order_body_size = 16;
 constexpr std::size_t replace_order_body_size = 32;
 constexpr std::size_t order_response_body_size = 17;
 constexpr std::size_t trade_execution_body_size = 40;
+constexpr std::size_t book_update_body_size = 42;
 
 inline std::array<std::byte, header_size> encode_header(
     const MessageHeader& header
@@ -553,6 +567,159 @@ decode_trade_execution(
         .sell_order_id = *sell_order_id,
         .price = *price,
         .quantity = *quantity,
+        .sequence_number = *sequence_number
+    };
+}
+
+inline std::array<
+    std::byte,
+    book_update_body_size
+> encode_book_update(
+    const BookUpdate& update
+) {
+    std::array<
+        std::byte,
+        book_update_body_size
+    > output {};
+
+    std::size_t offset = 0;
+
+    detail::write_integer(
+        output,
+        offset,
+        update.has_bid
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.best_bid
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.bid_quantity
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.has_ask
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.best_ask
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.ask_quantity
+    );
+
+    detail::write_integer(
+        output,
+        offset,
+        update.sequence_number
+    );
+
+    return output;
+}
+
+inline std::optional<BookUpdate> decode_book_update(
+    std::span<const std::byte> input
+) {
+    if (input.size() != book_update_body_size) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = 0;
+
+    const auto has_bid =
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
+
+    const auto best_bid =
+        detail::read_integer<std::int64_t>(
+            input,
+            offset
+        );
+
+    const auto bid_quantity =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    const auto has_ask =
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
+
+    const auto best_ask =
+        detail::read_integer<std::int64_t>(
+            input,
+            offset
+        );
+
+    const auto ask_quantity =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    const auto sequence_number =
+        detail::read_integer<std::uint64_t>(
+            input,
+            offset
+        );
+
+    if (
+        !has_bid ||
+        !best_bid ||
+        !bid_quantity ||
+        !has_ask ||
+        !best_ask ||
+        !ask_quantity ||
+        !sequence_number
+    ) {
+        return std::nullopt;
+    }
+
+    if (
+        (*has_bid != 0 && *has_bid != 1) ||
+        (*has_ask != 0 && *has_ask != 1)
+    ) {
+        return std::nullopt;
+    }
+
+    if (
+        *has_bid == 0 &&
+        (*best_bid != 0 || *bid_quantity != 0)
+    ) {
+        return std::nullopt;
+    }
+
+    if (
+        *has_ask == 0 &&
+        (*best_ask != 0 || *ask_quantity != 0)
+    ) {
+        return std::nullopt;
+    }
+
+    return BookUpdate {
+        .has_bid = *has_bid,
+        .best_bid = *best_bid,
+        .bid_quantity = *bid_quantity,
+        .has_ask = *has_ask,
+        .best_ask = *best_ask,
+        .ask_quantity = *ask_quantity,
         .sequence_number = *sequence_number
     };
 }

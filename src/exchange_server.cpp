@@ -152,15 +152,8 @@ void ExchangeServer::stop() {
 
     server_.stop();
 
-    std::vector<int> sockets;
-
-    {
-        std::lock_guard<std::mutex> lock(
-            clients_mutex_
-        );
-
-        sockets = client_sockets_;
-    }
+    const std::vector<int> sockets =
+        client_socket_snapshot();
 
     for (const int socket : sockets) {
         TcpServer::close_connection(socket);
@@ -353,6 +346,15 @@ void ExchangeServer::handle_new_order(
 
     std::vector<ExecutionDelivery> deliveries;
 
+    BookSnapshot snapshot {
+        .has_bid = false,
+        .best_bid = 0,
+        .bid_quantity = 0,
+        .has_ask = false,
+        .best_ask = 0,
+        .ask_quantity = 0
+    };
+
     {
         std::lock_guard<std::mutex> lock(
             engine_mutex_
@@ -425,6 +427,8 @@ void ExchangeServer::handle_new_order(
                     request->order_id
                 ] = client_socket;
             }
+
+            snapshot = capture_book_snapshot();
         }
     }
 
@@ -448,9 +452,12 @@ void ExchangeServer::handle_new_order(
         accepted
     );
 
-    if (accepted) {
-        send_execution_deliveries(deliveries);
+    if (!accepted) {
+        return;
     }
+
+    send_execution_deliveries(deliveries);
+    broadcast_book_update(snapshot);
 }
 
 void ExchangeServer::send_order_response(
@@ -501,9 +508,9 @@ void ExchangeServer::send_order_response(
             response_body
         );
 
-    std::lock_guard<std::mutex> send_lock(
+    std::lock_guard<std::mutex> send_lock {
         send_mutex_
-    );
+    };
 
     if (
         !TcpServer::send_to(
@@ -570,9 +577,9 @@ void ExchangeServer::send_trade_execution(
             response_body
         );
 
-    std::lock_guard<std::mutex> send_lock(
+    std::lock_guard<std::mutex> send_lock {
         send_mutex_
-    );
+    };
 
     if (
         !TcpServer::send_to(
@@ -604,6 +611,117 @@ void ExchangeServer::send_execution_deliveries(
             delivery.trade
         );
     }
+}
+
+void ExchangeServer::broadcast_book_update(
+    const BookSnapshot& snapshot
+) {
+    const std::uint64_t sequence_number =
+        next_sequence_number_.fetch_add(1);
+
+    const protocol::BookUpdate update {
+        .has_bid = static_cast<std::uint8_t>(
+            snapshot.has_bid ? 1 : 0
+        ),
+        .best_bid =
+            snapshot.has_bid
+                ? static_cast<std::int64_t>(
+                    snapshot.best_bid
+                )
+                : 0,
+        .bid_quantity =
+            snapshot.has_bid
+                ? static_cast<std::uint64_t>(
+                    snapshot.bid_quantity
+                )
+                : 0,
+        .has_ask = static_cast<std::uint8_t>(
+            snapshot.has_ask ? 1 : 0
+        ),
+        .best_ask =
+            snapshot.has_ask
+                ? static_cast<std::int64_t>(
+                    snapshot.best_ask
+                )
+                : 0,
+        .ask_quantity =
+            snapshot.has_ask
+                ? static_cast<std::uint64_t>(
+                    snapshot.ask_quantity
+                )
+                : 0,
+        .sequence_number = sequence_number
+    };
+
+    const auto body =
+        protocol::encode_book_update(update);
+
+    const protocol::MessageHeader header {
+        .magic = protocol::protocol_magic,
+        .version = protocol::protocol_version,
+        .type = protocol::MessageType::BookUpdate,
+        .body_size =
+            static_cast<std::uint32_t>(
+                body.size()
+            ),
+        .sequence_number = sequence_number
+    };
+
+    const auto encoded_header =
+        protocol::encode_header(header);
+
+    const std::vector<std::byte> message =
+        combine_message(
+            encoded_header,
+            body
+        );
+
+    const std::vector<int> clients =
+        client_socket_snapshot();
+
+    std::lock_guard<std::mutex> send_lock {
+        send_mutex_
+    };
+
+    for (const int socket : clients) {
+        if (
+            !TcpServer::send_to(
+                socket,
+                message
+            )
+        ) {
+            std::cerr
+                << "Failed to send book update to socket "
+                << socket
+                << '\n';
+        }
+    }
+}
+
+ExchangeServer::BookSnapshot
+ExchangeServer::capture_book_snapshot() const {
+    BookSnapshot snapshot {
+        .has_bid = book_.has_bids(),
+        .best_bid = 0,
+        .bid_quantity = 0,
+        .has_ask = book_.has_asks(),
+        .best_ask = 0,
+        .ask_quantity = 0
+    };
+
+    if (snapshot.has_bid) {
+        snapshot.best_bid = book_.best_bid();
+        snapshot.bid_quantity =
+            book_.best_bid_level().total_quantity();
+    }
+
+    if (snapshot.has_ask) {
+        snapshot.best_ask = book_.best_ask();
+        snapshot.ask_quantity =
+            book_.best_ask_level().total_quantity();
+    }
+
+    return snapshot;
 }
 
 int ExchangeServer::find_order_owner(
@@ -657,9 +775,9 @@ void ExchangeServer::remove_filled_order_owners(
 void ExchangeServer::register_client(
     int client_socket
 ) {
-    std::lock_guard<std::mutex> lock(
+    std::lock_guard<std::mutex> lock {
         clients_mutex_
-    );
+    };
 
     client_sockets_.push_back(client_socket);
 }
@@ -667,9 +785,9 @@ void ExchangeServer::register_client(
 void ExchangeServer::unregister_client(
     int client_socket
 ) {
-    std::lock_guard<std::mutex> lock(
+    std::lock_guard<std::mutex> lock {
         clients_mutex_
-    );
+    };
 
     const auto position = std::find(
         client_sockets_.begin(),
@@ -680,6 +798,15 @@ void ExchangeServer::unregister_client(
     if (position != client_sockets_.end()) {
         client_sockets_.erase(position);
     }
+}
+
+std::vector<int>
+ExchangeServer::client_socket_snapshot() {
+    std::lock_guard<std::mutex> lock {
+        clients_mutex_
+    };
+
+    return client_sockets_;
 }
 
 }  // namespace exchange

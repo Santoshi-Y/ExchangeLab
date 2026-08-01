@@ -42,6 +42,16 @@ private:
         int seller_socket;
     };
 
+    struct BookSnapshot {
+        bool has_bid;
+        Price best_bid;
+        Quantity bid_quantity;
+
+        bool has_ask;
+        Price best_ask;
+        Quantity ask_quantity;
+    };
+
     void handle_client(int client_socket);
 
     void process_receive_buffer(
@@ -76,6 +86,13 @@ private:
         const std::vector<ExecutionDelivery>& deliveries
     );
 
+    void broadcast_book_update(
+        const BookSnapshot& snapshot
+    );
+
+    [[nodiscard]] BookSnapshot capture_book_snapshot()
+        const;
+
     [[nodiscard]] int find_order_owner(
         OrderId order_id,
         OrderId incoming_order_id,
@@ -90,6 +107,9 @@ private:
     void register_client(int client_socket);
 
     void unregister_client(int client_socket);
+
+    [[nodiscard]] std::vector<int>
+    client_socket_snapshot();
 
     TcpServer server_;
 
