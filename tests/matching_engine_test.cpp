@@ -10,14 +10,15 @@ exchange::Order make_order(
     exchange::Price price,
     exchange::Quantity quantity,
     exchange::Timestamp timestamp,
-    exchange::OrderType type = exchange::OrderType::Limit
+    exchange::OrderType type = exchange::OrderType::Limit,
+    exchange::TimeInForce time_in_force =
+        exchange::TimeInForce::GoodTillCancel
 ) {
     return {
         .id = id,
         .side = side,
         .type = type,
-        .time_in_force =
-            exchange::TimeInForce::GoodTillCancel,
+        .time_in_force = time_in_force,
         .price = price,
         .initial_quantity = quantity,
         .remaining_quantity = quantity,
@@ -890,4 +891,120 @@ TEST(MatchingEngineTest, MarketSweepUpdatesOrderIndex) {
             .remaining_quantity,
         25
     );
+}
+
+
+TEST(MatchingEngineTest, ImmediateOrCancelDoesNotRestRemainder) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            101,
+            25,
+            2,
+            exchange::OrderType::Limit,
+            exchange::TimeInForce::ImmediateOrCancel
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 1U);
+    EXPECT_EQ(trades[0].quantity, 10);
+    EXPECT_TRUE(book.empty());
+    EXPECT_FALSE(book.contains(2));
+}
+
+TEST(MatchingEngineTest, FillOrKillRejectsWithoutChangingBook) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Buy,
+            101,
+            25,
+            2,
+            exchange::OrderType::Limit,
+            exchange::TimeInForce::FillOrKill
+        )
+    );
+
+    EXPECT_TRUE(trades.empty());
+    ASSERT_TRUE(book.has_asks());
+    EXPECT_EQ(book.best_ask(), 101);
+    EXPECT_EQ(book.best_ask_level().total_quantity(), 10);
+    EXPECT_TRUE(book.contains(1));
+    EXPECT_FALSE(book.contains(2));
+}
+
+TEST(MatchingEngineTest, FillOrKillFillsAcrossMultipleLevels) {
+    exchange::OrderBook book;
+    exchange::MatchingEngine engine;
+
+    engine.process_order(
+        book,
+        make_order(
+            1,
+            exchange::Side::Sell,
+            101,
+            10,
+            1
+        )
+    );
+
+    engine.process_order(
+        book,
+        make_order(
+            2,
+            exchange::Side::Sell,
+            102,
+            15,
+            2
+        )
+    );
+
+    const auto trades = engine.process_order(
+        book,
+        make_order(
+            3,
+            exchange::Side::Buy,
+            102,
+            25,
+            3,
+            exchange::OrderType::Limit,
+            exchange::TimeInForce::FillOrKill
+        )
+    );
+
+    ASSERT_EQ(trades.size(), 2U);
+    EXPECT_EQ(trades[0].quantity, 10);
+    EXPECT_EQ(trades[1].quantity, 15);
+    EXPECT_TRUE(book.empty());
 }

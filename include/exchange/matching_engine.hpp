@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -21,13 +22,6 @@ class MatchingEngine {
 public:
     using BufferedTrades = DefaultTradeBuffer;
 
-    /*
-     * Legacy convenience API.
-     *
-     * This preserves all existing callers and tests.
-     * It converts the inline buffer into std::vector,
-     * so executions may allocate.
-     */
     [[nodiscard]] std::vector<Trade> process_order(
         OrderBook& book,
         Order incoming
@@ -43,20 +37,39 @@ public:
         return trades.to_vector();
     }
 
-    /*
-     * Allocation-optimized API.
-     *
-     * The first eight trades are stored inline.
-     * Reusing the same buffer also retains overflow
-     * capacity for large sweeps.
-     */
     void process_order_into(
         OrderBook& book,
         Order incoming,
         BufferedTrades& trades
     ) {
+        /*
+         * Backward compatibility for existing callers:
+         * market orders historically had no explicit TIF and
+         * therefore arrive as GoodTillCancel. Market orders
+         * must never rest, so interpret that combination as IOC.
+         */
+        if (
+            incoming.type == OrderType::Market &&
+            incoming.time_in_force ==
+                TimeInForce::GoodTillCancel
+        ) {
+            incoming.time_in_force =
+                TimeInForce::ImmediateOrCancel;
+        }
+
         validate_incoming(incoming);
         trades.clear();
+
+        if (
+            incoming.time_in_force ==
+                TimeInForce::FillOrKill &&
+            book.executable_quantity(incoming) <
+                static_cast<std::uint64_t>(
+                    incoming.remaining_quantity
+                )
+        ) {
+            return;
+        }
 
         if (incoming.side == Side::Buy) {
             match_buy(
@@ -82,9 +95,6 @@ public:
         return book.cancel_order(order_id);
     }
 
-    /*
-     * Legacy replacement API.
-     */
     [[nodiscard]] ReplaceResult replace_order(
         OrderBook& book,
         OrderId order_id,
@@ -109,9 +119,6 @@ public:
         };
     }
 
-    /*
-     * Allocation-optimized replacement API.
-     */
     [[nodiscard]] bool replace_order_into(
         OrderBook& book,
         OrderId order_id,
@@ -160,6 +167,7 @@ private:
                 "Incoming order quantity must be positive"
             );
         }
+
     }
 
     [[nodiscard]] static bool buy_can_match(
@@ -190,6 +198,15 @@ private:
         }
 
         return incoming.price <= book.best_bid();
+    }
+
+    [[nodiscard]] static bool may_rest(
+        const Order& incoming
+    ) noexcept {
+        return
+            incoming.type == OrderType::Limit &&
+            incoming.time_in_force ==
+                TimeInForce::GoodTillCancel;
     }
 
     static void match_buy(
@@ -246,7 +263,7 @@ private:
 
         if (
             incoming.remaining_quantity > 0 &&
-            incoming.type == OrderType::Limit
+            may_rest(incoming)
         ) {
             book.add_order(std::move(incoming));
         }
@@ -306,7 +323,7 @@ private:
 
         if (
             incoming.remaining_quantity > 0 &&
-            incoming.type == OrderType::Limit
+            may_rest(incoming)
         ) {
             book.add_order(std::move(incoming));
         }

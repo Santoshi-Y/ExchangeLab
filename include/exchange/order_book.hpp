@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -39,7 +41,7 @@ public:
             );
         }
 
-        if (order.remaining_quantity <= 0) {
+        if (order.remaining_quantity == 0) {
             throw std::invalid_argument(
                 "Order quantity must be positive"
             );
@@ -63,7 +65,7 @@ public:
 
             order_locations_.emplace(
                 order_id,
-                OrderLocation{
+                OrderLocation {
                     .side = side,
                     .price = price,
                     .order_iterator = order_iterator
@@ -86,7 +88,7 @@ public:
 
         order_locations_.emplace(
             order_id,
-            OrderLocation{
+            OrderLocation {
                 .side = side,
                 .price = price,
                 .order_iterator = order_iterator
@@ -265,6 +267,69 @@ public:
         }
 
         return asks_.begin()->second;
+    }
+
+    /*
+     * Returns the quantity currently executable against
+     * the incoming order without modifying the book.
+     *
+     * A 64-bit accumulator avoids overflow while summing
+     * multiple 32-bit price-level quantities.
+     */
+    [[nodiscard]] std::uint64_t executable_quantity(
+        const Order& incoming
+    ) const noexcept {
+        std::uint64_t available = 0;
+
+        if (incoming.side == Side::Buy) {
+            for (const auto& [price, level] : asks_) {
+                if (
+                    incoming.type == OrderType::Limit &&
+                    price > incoming.price
+                ) {
+                    break;
+                }
+
+                available += static_cast<std::uint64_t>(
+                    level.total_quantity()
+                );
+
+                if (
+                    available >=
+                    static_cast<std::uint64_t>(
+                        incoming.remaining_quantity
+                    )
+                ) {
+                    break;
+                }
+            }
+
+            return available;
+        }
+
+        for (const auto& [price, level] : bids_) {
+            if (
+                incoming.type == OrderType::Limit &&
+                price < incoming.price
+            ) {
+                break;
+            }
+
+            available += static_cast<std::uint64_t>(
+                level.total_quantity()
+            );
+
+            if (
+                available >=
+                static_cast<std::uint64_t>(
+                    incoming.remaining_quantity
+                )
+            ) {
+                break;
+            }
+        }
+
+        return available;
     }
 
     void remove_best_bid_if_empty() {

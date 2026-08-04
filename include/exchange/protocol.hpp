@@ -10,7 +10,7 @@
 namespace exchange::protocol {
 
 constexpr std::uint32_t protocol_magic = 0x45584C42;  // "EXLB"
-constexpr std::uint16_t protocol_version = 1;
+constexpr std::uint16_t protocol_version = 2;
 
 enum class MessageType : std::uint16_t {
     NewOrder = 1,
@@ -39,6 +39,12 @@ enum class OrderType : std::uint8_t {
     Market = 2
 };
 
+enum class TimeInForce : std::uint8_t {
+    GoodTillCancel = 0,
+    ImmediateOrCancel = 1,
+    FillOrKill = 2
+};
+
 struct MessageHeader {
     std::uint32_t magic {};
     std::uint16_t version {};
@@ -54,6 +60,7 @@ struct NewOrderRequest {
     std::uint64_t quantity {};
     Side side {};
     OrderType order_type {};
+    TimeInForce time_in_force {};
 };
 
 struct CancelOrderRequest {
@@ -172,7 +179,7 @@ std::optional<Integer> read_integer(
 }  // namespace detail
 
 constexpr std::size_t header_size = 20;
-constexpr std::size_t new_order_body_size = 34;
+constexpr std::size_t new_order_body_size = 35;
 constexpr std::size_t cancel_order_body_size = 16;
 constexpr std::size_t replace_order_body_size = 32;
 constexpr std::size_t order_response_body_size = 17;
@@ -322,6 +329,14 @@ encode_new_order(
         )
     );
 
+    detail::write_integer(
+        output,
+        offset,
+        static_cast<std::uint8_t>(
+            request.time_in_force
+        )
+    );
+
     return output;
 }
 
@@ -370,13 +385,20 @@ inline std::optional<NewOrderRequest> decode_new_order(
             offset
         );
 
+    const auto time_in_force =
+        detail::read_integer<std::uint8_t>(
+            input,
+            offset
+        );
+
     if (
         !order_id ||
         !timestamp ||
         !price ||
         !quantity ||
         !side ||
-        !order_type
+        !order_type ||
+        !time_in_force
     ) {
         return std::nullopt;
     }
@@ -397,6 +419,23 @@ inline std::optional<NewOrderRequest> decode_new_order(
         return std::nullopt;
     }
 
+    if (
+        *time_in_force !=
+            static_cast<std::uint8_t>(
+                TimeInForce::GoodTillCancel
+            ) &&
+        *time_in_force !=
+            static_cast<std::uint8_t>(
+                TimeInForce::ImmediateOrCancel
+            ) &&
+        *time_in_force !=
+            static_cast<std::uint8_t>(
+                TimeInForce::FillOrKill
+            )
+    ) {
+        return std::nullopt;
+    }
+
     if (*quantity == 0) {
         return std::nullopt;
     }
@@ -408,7 +447,96 @@ inline std::optional<NewOrderRequest> decode_new_order(
         .quantity = *quantity,
         .side = static_cast<Side>(*side),
         .order_type =
-            static_cast<OrderType>(*order_type)
+            static_cast<OrderType>(*order_type),
+        .time_in_force =
+            static_cast<TimeInForce>(*time_in_force)
+    };
+}
+
+
+inline std::array<std::byte, cancel_order_body_size>
+encode_cancel_order(
+    const CancelOrderRequest& request
+) {
+    std::array<std::byte, cancel_order_body_size> output {};
+    std::size_t offset = 0;
+
+    detail::write_integer(output, offset, request.order_id);
+    detail::write_integer(output, offset, request.timestamp);
+
+    return output;
+}
+
+inline std::optional<CancelOrderRequest> decode_cancel_order(
+    std::span<const std::byte> input
+) {
+    if (input.size() != cancel_order_body_size) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = 0;
+
+    const auto order_id =
+        detail::read_integer<std::uint64_t>(input, offset);
+    const auto timestamp =
+        detail::read_integer<std::uint64_t>(input, offset);
+
+    if (!order_id || !timestamp) {
+        return std::nullopt;
+    }
+
+    return CancelOrderRequest {
+        .order_id = *order_id,
+        .timestamp = *timestamp
+    };
+}
+
+inline std::array<std::byte, replace_order_body_size>
+encode_replace_order(
+    const ReplaceOrderRequest& request
+) {
+    std::array<std::byte, replace_order_body_size> output {};
+    std::size_t offset = 0;
+
+    detail::write_integer(output, offset, request.order_id);
+    detail::write_integer(output, offset, request.timestamp);
+    detail::write_integer(output, offset, request.new_price);
+    detail::write_integer(output, offset, request.new_quantity);
+
+    return output;
+}
+
+inline std::optional<ReplaceOrderRequest> decode_replace_order(
+    std::span<const std::byte> input
+) {
+    if (input.size() != replace_order_body_size) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = 0;
+
+    const auto order_id =
+        detail::read_integer<std::uint64_t>(input, offset);
+    const auto timestamp =
+        detail::read_integer<std::uint64_t>(input, offset);
+    const auto new_price =
+        detail::read_integer<std::int64_t>(input, offset);
+    const auto new_quantity =
+        detail::read_integer<std::uint64_t>(input, offset);
+
+    if (!order_id || !timestamp || !new_price || !new_quantity) {
+        return std::nullopt;
+    }
+
+    if (*new_quantity == 0) {
+        return std::nullopt;
+    }
+
+    return ReplaceOrderRequest {
+        .order_id = *order_id,
+        .timestamp = *timestamp,
+        .new_price = *new_price,
+        .new_quantity = *new_quantity
     };
 }
 

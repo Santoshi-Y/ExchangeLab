@@ -51,6 +51,23 @@ OrderType convert_order_type(
     return OrderType::Limit;
 }
 
+TimeInForce convert_time_in_force(
+    protocol::TimeInForce time_in_force
+) {
+    switch (time_in_force) {
+        case protocol::TimeInForce::GoodTillCancel:
+            return TimeInForce::GoodTillCancel;
+
+        case protocol::TimeInForce::ImmediateOrCancel:
+            return TimeInForce::ImmediateOrCancel;
+
+        case protocol::TimeInForce::FillOrKill:
+            return TimeInForce::FillOrKill;
+    }
+
+    return TimeInForce::GoodTillCancel;
+}
+
 template <
     std::size_t HeaderSize,
     std::size_t BodySize
@@ -327,9 +344,20 @@ void ExchangeServer::handle_message(
             break;
 
         case protocol::MessageType::CancelOrder:
+            handle_cancel_order(
+                client_socket,
+                header,
+                body
+            );
+            break;
+
         case protocol::MessageType::ReplaceOrder:
-            std::cerr
-                << "Message type is not implemented yet\n";
+            handle_replace_order(
+                client_socket,
+                header,
+                body,
+                trade_buffer
+            );
             break;
 
         default:
@@ -430,10 +458,9 @@ void ExchangeServer::handle_new_order(
                         request->order_type
                     ),
                 .time_in_force =
-                    request->order_type ==
-                            protocol::OrderType::Market
-                        ? TimeInForce::ImmediateOrCancel
-                        : TimeInForce::GoodTillCancel,
+                    convert_time_in_force(
+                        request->time_in_force
+                    ),
                 .price = request->price,
                 .initial_quantity = quantity,
                 .remaining_quantity = quantity,
@@ -580,10 +607,285 @@ void ExchangeServer::handle_new_order(
     }
 }
 
+
+void ExchangeServer::handle_cancel_order(
+    int client_socket,
+    const protocol::MessageHeader& header,
+    std::span<const std::byte> body
+) {
+    if (header.body_size != protocol::cancel_order_body_size) {
+        send_order_response(client_socket, 0, false);
+        return;
+    }
+
+    const auto request = protocol::decode_cancel_order(body);
+
+    if (!request.has_value()) {
+        send_order_response(client_socket, 0, false);
+        return;
+    }
+
+    bool cancelled = false;
+    BookSnapshot snapshot {
+        .has_bid = false,
+        .best_bid = 0,
+        .bid_quantity = 0,
+        .has_ask = false,
+        .best_ask = 0,
+        .ask_quantity = 0
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(engine_mutex_);
+
+        const auto owner = order_owners_.find(request->order_id);
+
+        if (
+            owner != order_owners_.end() &&
+            owner->second == client_socket &&
+            book_.find_order(request->order_id) != nullptr
+        ) {
+            cancelled = engine_.cancel_order(
+                book_,
+                request->order_id
+            );
+
+            if (cancelled) {
+                order_owners_.erase(owner);
+                snapshot = capture_book_snapshot();
+            }
+        }
+    }
+
+    send_order_response(
+        client_socket,
+        request->order_id,
+        cancelled,
+        protocol::MessageType::OrderCancelled
+    );
+
+    if (!cancelled) {
+        return;
+    }
+
+    broadcast_book_update(snapshot);
+
+    broadcast_level3_order_deleted({
+        .order_id = request->order_id,
+        .sequence_number = 0
+    });
+}
+
+void ExchangeServer::handle_replace_order(
+    int client_socket,
+    const protocol::MessageHeader& header,
+    std::span<const std::byte> body,
+    MatchingEngine::BufferedTrades& trade_buffer
+) {
+    if (header.body_size != protocol::replace_order_body_size) {
+        send_order_response(client_socket, 0, false);
+        return;
+    }
+
+    const auto request = protocol::decode_replace_order(body);
+
+    if (!request.has_value()) {
+        send_order_response(client_socket, 0, false);
+        return;
+    }
+
+    if (
+        request->new_quantity >
+        static_cast<std::uint64_t>(
+            std::numeric_limits<Quantity>::max()
+        )
+    ) {
+        send_order_response(
+            client_socket,
+            request->order_id,
+            false
+        );
+        return;
+    }
+
+    const Quantity new_quantity =
+        static_cast<Quantity>(request->new_quantity);
+
+    bool replaced = false;
+    std::vector<ExecutionDelivery> deliveries;
+    std::vector<protocol::Level3OrderExecuted> level3_executions;
+    std::vector<protocol::Level3OrderDeleted> level3_deletions;
+    std::optional<protocol::Level3AddOrder> level3_add;
+
+    BookSnapshot snapshot {
+        .has_bid = false,
+        .best_bid = 0,
+        .bid_quantity = 0,
+        .has_ask = false,
+        .best_ask = 0,
+        .ask_quantity = 0
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(engine_mutex_);
+
+        const auto owner = order_owners_.find(request->order_id);
+
+        if (
+            owner != order_owners_.end() &&
+            owner->second == client_socket &&
+            book_.find_order(request->order_id) != nullptr
+        ) {
+            const ReplaceResult result =
+                engine_.replace_order(
+                    book_,
+                    request->order_id,
+                    request->new_price,
+                    new_quantity,
+                    request->timestamp
+                );
+
+            replaced = result.replaced;
+            trade_buffer.clear();
+
+            for (const Trade& trade : result.trades) {
+                trade_buffer.push_back(trade);
+            }
+
+            if (replaced) {
+                deliveries.reserve(trade_buffer.size());
+                std::unordered_set<OrderId> deleted_order_ids;
+
+                for (const Trade& trade : trade_buffer) {
+                    deliveries.push_back({
+                        .trade = trade,
+                        .buyer_socket =
+                            find_order_owner(
+                                trade.buy_order_id,
+                                request->order_id,
+                                client_socket
+                            ),
+                        .seller_socket =
+                            find_order_owner(
+                                trade.sell_order_id,
+                                request->order_id,
+                                client_socket
+                            )
+                    });
+
+                    level3_executions.push_back({
+                        .buy_order_id = trade.buy_order_id,
+                        .sell_order_id = trade.sell_order_id,
+                        .price = static_cast<std::int64_t>(
+                            trade.price
+                        ),
+                        .quantity = static_cast<std::uint64_t>(
+                            trade.quantity
+                        ),
+                        .sequence_number = 0
+                    });
+
+                    if (
+                        trade.buy_order_id != request->order_id &&
+                        book_.find_order(trade.buy_order_id) == nullptr
+                    ) {
+                        deleted_order_ids.insert(
+                            trade.buy_order_id
+                        );
+                    }
+
+                    if (
+                        trade.sell_order_id != request->order_id &&
+                        book_.find_order(trade.sell_order_id) == nullptr
+                    ) {
+                        deleted_order_ids.insert(
+                            trade.sell_order_id
+                        );
+                    }
+                }
+
+                for (const OrderId deleted_id : deleted_order_ids) {
+                    level3_deletions.push_back({
+                        .order_id = deleted_id,
+                        .sequence_number = 0
+                    });
+                }
+
+                remove_filled_order_owners(
+                    trade_buffer,
+                    request->order_id
+                );
+
+                if (
+                    book_.find_order(request->order_id) != nullptr
+                ) {
+                    order_owners_[request->order_id] =
+                        client_socket;
+
+                    const Order* resting =
+                        book_.find_order(request->order_id);
+
+                    level3_add = protocol::Level3AddOrder {
+                        .order_id = resting->id,
+                        .timestamp = resting->timestamp,
+                        .price = static_cast<std::int64_t>(
+                            resting->price
+                        ),
+                        .quantity = static_cast<std::uint64_t>(
+                            resting->remaining_quantity
+                        ),
+                        .side = resting->side == Side::Buy
+                            ? protocol::Side::Buy
+                            : protocol::Side::Sell,
+                        .sequence_number = 0
+                    };
+                } else {
+                    order_owners_.erase(request->order_id);
+                }
+
+                snapshot = capture_book_snapshot();
+            }
+        }
+    }
+
+    send_order_response(
+        client_socket,
+        request->order_id,
+        replaced,
+        protocol::MessageType::OrderReplaced
+    );
+
+    if (!replaced) {
+        return;
+    }
+
+    send_execution_deliveries(deliveries);
+    broadcast_book_update(snapshot);
+
+    // A replacement removes the old resting representation first.
+    broadcast_level3_order_deleted({
+        .order_id = request->order_id,
+        .sequence_number = 0
+    });
+
+    for (const auto& event : level3_executions) {
+        broadcast_level3_order_executed(event);
+    }
+
+    for (const auto& event : level3_deletions) {
+        broadcast_level3_order_deleted(event);
+    }
+
+    if (level3_add.has_value()) {
+        broadcast_level3_add_order(*level3_add);
+    }
+}
+
 void ExchangeServer::send_order_response(
     int client_socket,
     std::uint64_t order_id,
-    bool success
+    bool success,
+    protocol::MessageType success_type
 ) {
     const std::uint64_t sequence_number =
         next_sequence_number_.fetch_add(1);
@@ -606,8 +908,7 @@ void ExchangeServer::send_order_response(
         .version = protocol::protocol_version,
         .type =
             success
-                ? protocol::MessageType::
-                    OrderAccepted
+                ? success_type
                 : protocol::MessageType::
                     OrderRejected,
         .body_size =

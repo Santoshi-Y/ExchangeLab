@@ -162,6 +162,40 @@ bool send_order(
     );
 }
 
+bool send_cancel(
+    int socket,
+    const exchange::protocol::CancelOrderRequest& request,
+    std::uint64_t sequence_number
+) {
+    const auto body = exchange::protocol::encode_cancel_order(request);
+    const exchange::protocol::MessageHeader header {
+        .magic = exchange::protocol::protocol_magic,
+        .version = exchange::protocol::protocol_version,
+        .type = exchange::protocol::MessageType::CancelOrder,
+        .body_size = static_cast<std::uint32_t>(body.size()),
+        .sequence_number = sequence_number
+    };
+    return send_all(socket, combine_message(
+        exchange::protocol::encode_header(header), body));
+}
+
+bool send_replace(
+    int socket,
+    const exchange::protocol::ReplaceOrderRequest& request,
+    std::uint64_t sequence_number
+) {
+    const auto body = exchange::protocol::encode_replace_order(request);
+    const exchange::protocol::MessageHeader header {
+        .magic = exchange::protocol::protocol_magic,
+        .version = exchange::protocol::protocol_version,
+        .type = exchange::protocol::MessageType::ReplaceOrder,
+        .body_size = static_cast<std::uint32_t>(body.size()),
+        .sequence_number = sequence_number
+    };
+    return send_all(socket, combine_message(
+        exchange::protocol::encode_header(header), body));
+}
+
 std::optional<ReceivedMessage> receive_message(int socket) {
     std::array<
         std::byte,
@@ -230,7 +264,11 @@ receive_order_response(int socket) {
             message->header.type ==
                 exchange::protocol::MessageType::OrderAccepted ||
             message->header.type ==
-                exchange::protocol::MessageType::OrderRejected
+                exchange::protocol::MessageType::OrderRejected ||
+            message->header.type ==
+                exchange::protocol::MessageType::OrderCancelled ||
+            message->header.type ==
+                exchange::protocol::MessageType::OrderReplaced
         ) {
             return exchange::protocol::decode_order_response(
                 message->body
@@ -506,5 +544,99 @@ TEST(
     server.stop();
     server_thread.join();
 }
+
+
+TEST(ExchangeServerTest, CancelsOwnedOrderOverTcp) {
+    constexpr std::uint16_t port = 19004;
+    exchange::ExchangeServer server(port);
+    ASSERT_TRUE(server.start());
+    std::thread server_thread([&server]() { server.run(); });
+
+    const int owner_socket = connect_to_server(port);
+    const int observer_socket = connect_to_server(port);
+    ASSERT_GE(owner_socket, 0);
+    ASSERT_GE(observer_socket, 0);
+
+    const exchange::protocol::NewOrderRequest order {
+        .order_id = 5001, .timestamp = 1, .price = 100,
+        .quantity = 20, .side = exchange::protocol::Side::Buy,
+        .order_type = exchange::protocol::OrderType::Limit
+    };
+    ASSERT_TRUE(send_order(owner_socket, order, 1));
+    ASSERT_TRUE(receive_order_response(owner_socket).has_value());
+    ASSERT_TRUE(receive_book_update(owner_socket).has_value());
+    ASSERT_TRUE(receive_book_update(observer_socket).has_value());
+
+    const exchange::protocol::CancelOrderRequest cancel {
+        .order_id = 5001, .timestamp = 2
+    };
+    ASSERT_TRUE(send_cancel(owner_socket, cancel, 2));
+    const auto response = receive_order_response(owner_socket);
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response->order_id, 5001);
+    EXPECT_EQ(response->success, 1);
+
+    const auto owner_update = receive_book_update(owner_socket);
+    const auto observer_update = receive_book_update(observer_socket);
+    ASSERT_TRUE(owner_update.has_value());
+    ASSERT_TRUE(observer_update.has_value());
+    EXPECT_EQ(owner_update->has_bid, 0);
+    EXPECT_EQ(owner_update->has_ask, 0);
+    EXPECT_EQ(observer_update->has_bid, 0);
+    EXPECT_EQ(observer_update->has_ask, 0);
+
+    close_client(owner_socket);
+    close_client(observer_socket);
+    server.stop();
+    server_thread.join();
+}
+
+TEST(ExchangeServerTest, ReplacesOwnedOrderOverTcp) {
+    constexpr std::uint16_t port = 19005;
+    exchange::ExchangeServer server(port);
+    ASSERT_TRUE(server.start());
+    std::thread server_thread([&server]() { server.run(); });
+
+    const int owner_socket = connect_to_server(port);
+    const int observer_socket = connect_to_server(port);
+    ASSERT_GE(owner_socket, 0);
+    ASSERT_GE(observer_socket, 0);
+
+    const exchange::protocol::NewOrderRequest order {
+        .order_id = 6001, .timestamp = 1, .price = 100,
+        .quantity = 10, .side = exchange::protocol::Side::Buy,
+        .order_type = exchange::protocol::OrderType::Limit
+    };
+    ASSERT_TRUE(send_order(owner_socket, order, 1));
+    ASSERT_TRUE(receive_order_response(owner_socket).has_value());
+    ASSERT_TRUE(receive_book_update(owner_socket).has_value());
+    ASSERT_TRUE(receive_book_update(observer_socket).has_value());
+
+    const exchange::protocol::ReplaceOrderRequest replace {
+        .order_id = 6001, .timestamp = 2,
+        .new_price = 102, .new_quantity = 25
+    };
+    ASSERT_TRUE(send_replace(owner_socket, replace, 2));
+    const auto response = receive_order_response(owner_socket);
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response->order_id, 6001);
+    EXPECT_EQ(response->success, 1);
+
+    const auto owner_update = receive_book_update(owner_socket);
+    const auto observer_update = receive_book_update(observer_socket);
+    ASSERT_TRUE(owner_update.has_value());
+    ASSERT_TRUE(observer_update.has_value());
+    EXPECT_EQ(owner_update->has_bid, 1);
+    EXPECT_EQ(owner_update->best_bid, 102);
+    EXPECT_EQ(owner_update->bid_quantity, 25);
+    EXPECT_EQ(observer_update->best_bid, 102);
+    EXPECT_EQ(observer_update->bid_quantity, 25);
+
+    close_client(owner_socket);
+    close_client(observer_socket);
+    server.stop();
+    server_thread.join();
+}
+
 
 }  // namespace
