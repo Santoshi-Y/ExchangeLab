@@ -290,6 +290,17 @@ ExchangeReplayer::order_book() const noexcept {
     return *book_;
 }
 
+std::unique_ptr<OrderBook>
+ExchangeReplayer::release_order_book() {
+    std::unique_ptr<OrderBook> recovered =
+        std::move(book_);
+
+    book_ = std::make_unique<OrderBook>();
+    trade_buffer_.clear();
+
+    return recovered;
+}
+
 void ExchangeReplayer::reset() {
     book_ = std::make_unique<OrderBook>();
     trade_buffer_.clear();

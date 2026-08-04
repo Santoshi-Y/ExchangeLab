@@ -16,6 +16,7 @@
 #include "exchange/journal.hpp"
 #include "exchange/order.hpp"
 #include "exchange/protocol.hpp"
+#include "exchange/replay.hpp"
 #include "exchange/types.hpp"
 
 namespace exchange {
@@ -102,27 +103,157 @@ ExchangeServer::ExchangeServer(
     std::optional<std::filesystem::path> journal_path
 )
     : server_(port),
+      journal_path_(std::move(journal_path)),
       running_(false),
-      next_sequence_number_(1) {
-    if (journal_path.has_value()) {
-        journal_ =
-            std::make_unique<ExchangeJournal>(
-                *journal_path
-            );
-    }
-}
+      next_sequence_number_(1) {}
 
 ExchangeServer::~ExchangeServer() {
     stop();
 }
 
+bool ExchangeServer::recover_from_journal() {
+    recovery_state_ = RecoveryState {};
+
+    if (!journal_path_.has_value()) {
+        recovery_state_.successful = true;
+        return true;
+    }
+
+    recovery_state_.attempted = true;
+
+    std::error_code error;
+
+    const bool journal_exists =
+        std::filesystem::exists(
+            *journal_path_,
+            error
+        );
+
+    if (error) {
+        std::cerr
+            << "Could not inspect journal: "
+            << error.message()
+            << '\n';
+
+        return false;
+    }
+
+    if (!journal_exists) {
+        recovery_state_.successful = true;
+        return true;
+    }
+
+    const std::uintmax_t journal_size =
+        std::filesystem::file_size(
+            *journal_path_,
+            error
+        );
+
+    if (error) {
+        std::cerr
+            << "Could not read journal size: "
+            << error.message()
+            << '\n';
+
+        return false;
+    }
+
+    if (journal_size == 0) {
+        recovery_state_.successful = true;
+        return true;
+    }
+
+    ExchangeReplayer replayer;
+
+    if (!replayer.replay(*journal_path_)) {
+        std::cerr
+            << "Failed to replay journal: "
+            << *journal_path_
+            << '\n';
+
+        return false;
+    }
+
+    const ReplaySummary replay_summary =
+        replayer.summary();
+
+    std::unique_ptr<OrderBook> recovered_book =
+        replayer.release_order_book();
+
+    if (recovered_book == nullptr) {
+        std::cerr
+            << "Replay did not produce an order book\n";
+
+        return false;
+    }
+
+    /*
+     * Swap all book containers together. This preserves the
+     * list iterators held by the order-ID index.
+     */
+    book_.swap(*recovered_book);
+
+    recovery_state_.successful = true;
+    recovery_state_.journal_records =
+        replay_summary.journal_records;
+    recovery_state_.new_orders =
+        replay_summary.new_orders;
+    recovery_state_.trades =
+        replay_summary.trades;
+    recovery_state_.rejected_messages =
+        replay_summary.rejected_messages;
+    recovery_state_.unsupported_messages =
+        replay_summary.unsupported_messages;
+    recovery_state_.remaining_orders =
+        book_.order_count();
+
+    return true;
+}
+
 bool ExchangeServer::start() {
+    if (!recovery_completed_) {
+        if (!recover_from_journal()) {
+            return false;
+        }
+
+        recovery_completed_ = true;
+    }
+
+    /*
+     * Open the append-only writer only after replay has
+     * finished. Recovered messages are therefore never
+     * written to the journal a second time.
+     */
+    if (
+        journal_path_.has_value() &&
+        journal_ == nullptr
+    ) {
+        try {
+            journal_ =
+                std::make_unique<ExchangeJournal>(
+                    *journal_path_
+                );
+        } catch (const std::exception& exception) {
+            std::cerr
+                << "Failed to open journal: "
+                << exception.what()
+                << '\n';
+
+            return false;
+        }
+    }
+
     if (!server_.start()) {
         return false;
     }
 
     running_.store(true);
     return true;
+}
+
+const RecoveryState&
+ExchangeServer::recovery_state() const noexcept {
+    return recovery_state_;
 }
 
 void ExchangeServer::run() {

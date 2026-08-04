@@ -24,6 +24,32 @@ int main() {
         return 1;
     }
 
+    const exchange::RecoveryState& recovery =
+        server.recovery_state();
+
+    if (recovery.attempted) {
+        std::cout
+            << "Journal recovery complete\n"
+            << "  Records: "
+            << recovery.journal_records
+            << '\n'
+            << "  New orders: "
+            << recovery.new_orders
+            << '\n'
+            << "  Trades: "
+            << recovery.trades
+            << '\n'
+            << "  Rejected records: "
+            << recovery.rejected_messages
+            << '\n'
+            << "  Unsupported records: "
+            << recovery.unsupported_messages
+            << '\n'
+            << "  Remaining orders: "
+            << recovery.remaining_orders
+            << '\n';
+    }
+
     std::cout
         << "ExchangeLab listening on port "
         << port

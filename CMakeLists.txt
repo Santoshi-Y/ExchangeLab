@@ -169,6 +169,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/tcp_server_test.cpp
         tests/exchange_server_test.cpp
         tests/replay_test.cpp
+        tests/startup_recovery_test.cpp
     )
 
     target_link_libraries(

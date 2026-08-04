@@ -21,6 +21,19 @@
 
 namespace exchange {
 
+struct RecoveryState {
+    bool attempted {false};
+    bool successful {false};
+
+    std::uint64_t journal_records {0};
+    std::uint64_t new_orders {0};
+    std::uint64_t trades {0};
+    std::uint64_t rejected_messages {0};
+    std::uint64_t unsupported_messages {0};
+
+    std::size_t remaining_orders {0};
+};
+
 class ExchangeServer {
 public:
     explicit ExchangeServer(
@@ -40,6 +53,9 @@ public:
     void run();
     void stop();
 
+    [[nodiscard]] const RecoveryState&
+    recovery_state() const noexcept;
+
 private:
     struct ExecutionDelivery {
         Trade trade;
@@ -55,6 +71,8 @@ private:
         Price best_ask;
         Quantity ask_quantity;
     };
+
+    [[nodiscard]] bool recover_from_journal();
 
     void handle_client(int client_socket);
 
@@ -151,8 +169,14 @@ private:
     std::vector<int> client_sockets_;
     std::mutex threads_mutex_;
     std::vector<std::thread> client_threads_;
+
+    std::optional<std::filesystem::path> journal_path_;
     std::unique_ptr<ExchangeJournal> journal_;
     std::mutex journal_processing_mutex_;
+
+    RecoveryState recovery_state_;
+    bool recovery_completed_ {false};
+
     std::atomic<bool> running_;
     std::atomic<std::uint64_t> next_sequence_number_;
 };

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -32,12 +31,19 @@ public:
     [[nodiscard]] const OrderBook&
     order_book() const noexcept;
 
+    /*
+     * Transfers the reconstructed order book to a live server.
+     * After this call, this replayer owns a fresh empty book.
+     */
+    [[nodiscard]] std::unique_ptr<OrderBook>
+    release_order_book();
+
 private:
     void reset();
 
-    std::unique_ptr<OrderBook> book_;
     MatchingEngine engine_;
     MatchingEngine::BufferedTrades trade_buffer_;
+    std::unique_ptr<OrderBook> book_;
     ReplaySummary summary_;
 };
 

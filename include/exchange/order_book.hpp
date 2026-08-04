@@ -195,6 +195,12 @@ public:
         return order_locations_.size();
     }
 
+    void swap(OrderBook& other) noexcept {
+        bids_.swap(other.bids_);
+        asks_.swap(other.asks_);
+        order_locations_.swap(other.order_locations_);
+    }
+
     [[nodiscard]] bool empty() const noexcept {
         return bids_.empty() && asks_.empty();
     }
