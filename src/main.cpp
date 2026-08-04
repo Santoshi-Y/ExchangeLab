@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 
 #include "exchange/exchange_server.hpp"
@@ -6,11 +7,17 @@
 int main() {
     constexpr std::uint16_t port = 9000;
 
-    exchange::ExchangeServer server(port);
+    const std::filesystem::path journal_path =
+        "exchange.log";
+
+    exchange::ExchangeServer server(
+        port,
+        journal_path
+    );
 
     if (!server.start()) {
         std::cerr
-            << "Failed to start exchange server on port "
+            << "Failed to start ExchangeLab on port "
             << port
             << '\n';
 
@@ -20,12 +27,12 @@ int main() {
     std::cout
         << "ExchangeLab listening on port "
         << port
-        << "...\n";
+        << '\n'
+        << "Journal: "
+        << journal_path
+        << '\n';
 
     server.run();
-
-    std::cout
-        << "ExchangeLab stopped.\n";
 
     return 0;
 }

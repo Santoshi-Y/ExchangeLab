@@ -18,3 +18,7 @@ cmake-build-*/
 benchmark-results/
 benchmark-build-output.txt
 build-output.txt
+build-error.txt
+
+exchange.log
+*.journal

@@ -19,6 +19,8 @@ add_library(
     exchange_lab_lib
     src/tcp_server.cpp
     src/exchange_server.cpp
+    src/journal.cpp
+    src/replay.cpp
 )
 
 target_include_directories(
@@ -66,6 +68,28 @@ target_link_libraries(
         exchange_lab_lib
 )
 
+add_executable(
+    exchange_replay
+    tools/exchange_replay.cpp
+)
+
+target_link_libraries(
+    exchange_replay
+    PRIVATE
+        exchange_lab_lib
+)
+
+add_executable(
+    exchange_client
+    tools/exchange_client.cpp
+)
+
+target_link_libraries(
+    exchange_client
+    PRIVATE
+        exchange_lab_lib
+)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
         exchange_lab
@@ -74,9 +98,37 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             -Wextra
             -Wpedantic
     )
+
+    target_compile_options(
+        exchange_replay
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    target_compile_options(
+        exchange_client
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
 elseif(MSVC)
     target_compile_options(
         exchange_lab
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_replay
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_client
         PRIVATE
             /W4
     )
@@ -116,6 +168,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/protocol_test.cpp
         tests/tcp_server_test.cpp
         tests/exchange_server_test.cpp
+        tests/replay_test.cpp
     )
 
     target_link_libraries(
