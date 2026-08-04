@@ -3,12 +3,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "exchange/journal.hpp"
 #include "exchange/matching_engine.hpp"
 #include "exchange/order_book.hpp"
 #include "exchange/protocol.hpp"
@@ -19,20 +23,21 @@ namespace exchange {
 
 class ExchangeServer {
 public:
-    explicit ExchangeServer(std::uint16_t port);
+    explicit ExchangeServer(
+        std::uint16_t port,
+        std::optional<std::filesystem::path> journal_path =
+            std::nullopt
+    );
 
     ~ExchangeServer();
 
     ExchangeServer(const ExchangeServer&) = delete;
     ExchangeServer& operator=(const ExchangeServer&) = delete;
-
     ExchangeServer(ExchangeServer&&) = delete;
     ExchangeServer& operator=(ExchangeServer&&) = delete;
 
     bool start();
-
     void run();
-
     void stop();
 
 private:
@@ -46,7 +51,6 @@ private:
         bool has_bid;
         Price best_bid;
         Quantity bid_quantity;
-
         bool has_ask;
         Price best_ask;
         Quantity ask_quantity;
@@ -89,12 +93,21 @@ private:
         const std::vector<ExecutionDelivery>& deliveries
     );
 
-    void broadcast_book_update(
-        const BookSnapshot& snapshot
+    void broadcast_book_update(const BookSnapshot& snapshot);
+
+    void broadcast_level3_add_order(
+        const protocol::Level3AddOrder& event
     );
 
-    [[nodiscard]] BookSnapshot
-    capture_book_snapshot() const;
+    void broadcast_level3_order_executed(
+        const protocol::Level3OrderExecuted& event
+    );
+
+    void broadcast_level3_order_deleted(
+        const protocol::Level3OrderDeleted& event
+    );
+
+    [[nodiscard]] BookSnapshot capture_book_snapshot() const;
 
     [[nodiscard]] int find_order_owner(
         OrderId order_id,
@@ -108,29 +121,23 @@ private:
     );
 
     void register_client(int client_socket);
-
     void unregister_client(int client_socket);
 
-    [[nodiscard]] std::vector<int>
-    client_socket_snapshot();
+    [[nodiscard]] std::vector<int> client_socket_snapshot();
 
     TcpServer server_;
-
     OrderBook book_;
     MatchingEngine engine_;
 
     std::mutex engine_mutex_;
-
     std::unordered_map<OrderId, int> order_owners_;
-
     std::mutex send_mutex_;
-
     std::mutex clients_mutex_;
     std::vector<int> client_sockets_;
-
     std::mutex threads_mutex_;
     std::vector<std::thread> client_threads_;
-
+    std::unique_ptr<ExchangeJournal> journal_;
+    std::mutex journal_processing_mutex_;
     std::atomic<bool> running_;
     std::atomic<std::uint64_t> next_sequence_number_;
 };

@@ -22,7 +22,11 @@ enum class MessageType : std::uint16_t {
     OrderCancelled = 102,
     OrderReplaced = 103,
     TradeExecution = 104,
-    BookUpdate = 105
+    BookUpdate = 105,
+
+    Level3AddOrder = 200,
+    Level3OrderExecuted = 201,
+    Level3OrderDeleted = 202
 };
 
 enum class Side : std::uint8_t {
@@ -90,6 +94,28 @@ struct BookUpdate {
     std::uint64_t sequence_number {};
 };
 
+struct Level3AddOrder {
+    std::uint64_t order_id {};
+    std::uint64_t timestamp {};
+    std::int64_t price {};
+    std::uint64_t quantity {};
+    Side side {};
+    std::uint64_t sequence_number {};
+};
+
+struct Level3OrderExecuted {
+    std::uint64_t buy_order_id {};
+    std::uint64_t sell_order_id {};
+    std::int64_t price {};
+    std::uint64_t quantity {};
+    std::uint64_t sequence_number {};
+};
+
+struct Level3OrderDeleted {
+    std::uint64_t order_id {};
+    std::uint64_t sequence_number {};
+};
+
 namespace detail {
 
 template <typename Integer>
@@ -152,6 +178,9 @@ constexpr std::size_t replace_order_body_size = 32;
 constexpr std::size_t order_response_body_size = 17;
 constexpr std::size_t trade_execution_body_size = 40;
 constexpr std::size_t book_update_body_size = 42;
+constexpr std::size_t level3_add_order_body_size = 41;
+constexpr std::size_t level3_order_executed_body_size = 40;
+constexpr std::size_t level3_order_deleted_body_size = 16;
 
 inline std::array<std::byte, header_size> encode_header(
     const MessageHeader& header
@@ -720,6 +749,100 @@ inline std::optional<BookUpdate> decode_book_update(
         .has_ask = *has_ask,
         .best_ask = *best_ask,
         .ask_quantity = *ask_quantity,
+        .sequence_number = *sequence_number
+    };
+}
+
+
+inline std::array<std::byte, level3_add_order_body_size>
+encode_level3_add_order(const Level3AddOrder& event) {
+    std::array<std::byte, level3_add_order_body_size> output {};
+    std::size_t offset = 0;
+    detail::write_integer(output, offset, event.order_id);
+    detail::write_integer(output, offset, event.timestamp);
+    detail::write_integer(output, offset, event.price);
+    detail::write_integer(output, offset, event.quantity);
+    detail::write_integer(output, offset, static_cast<std::uint8_t>(event.side));
+    detail::write_integer(output, offset, event.sequence_number);
+    return output;
+}
+
+inline std::optional<Level3AddOrder> decode_level3_add_order(
+    std::span<const std::byte> input
+) {
+    if (input.size() != level3_add_order_body_size) return std::nullopt;
+    std::size_t offset = 0;
+    const auto order_id = detail::read_integer<std::uint64_t>(input, offset);
+    const auto timestamp = detail::read_integer<std::uint64_t>(input, offset);
+    const auto price = detail::read_integer<std::int64_t>(input, offset);
+    const auto quantity = detail::read_integer<std::uint64_t>(input, offset);
+    const auto side = detail::read_integer<std::uint8_t>(input, offset);
+    const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
+    if (!order_id || !timestamp || !price || !quantity || !side || !sequence_number) return std::nullopt;
+    if (*quantity == 0) return std::nullopt;
+    if (*side != static_cast<std::uint8_t>(Side::Buy) &&
+        *side != static_cast<std::uint8_t>(Side::Sell)) return std::nullopt;
+    return Level3AddOrder {
+        .order_id = *order_id,
+        .timestamp = *timestamp,
+        .price = *price,
+        .quantity = *quantity,
+        .side = static_cast<Side>(*side),
+        .sequence_number = *sequence_number
+    };
+}
+
+inline std::array<std::byte, level3_order_executed_body_size>
+encode_level3_order_executed(const Level3OrderExecuted& event) {
+    std::array<std::byte, level3_order_executed_body_size> output {};
+    std::size_t offset = 0;
+    detail::write_integer(output, offset, event.buy_order_id);
+    detail::write_integer(output, offset, event.sell_order_id);
+    detail::write_integer(output, offset, event.price);
+    detail::write_integer(output, offset, event.quantity);
+    detail::write_integer(output, offset, event.sequence_number);
+    return output;
+}
+
+inline std::optional<Level3OrderExecuted> decode_level3_order_executed(
+    std::span<const std::byte> input
+) {
+    if (input.size() != level3_order_executed_body_size) return std::nullopt;
+    std::size_t offset = 0;
+    const auto buy_order_id = detail::read_integer<std::uint64_t>(input, offset);
+    const auto sell_order_id = detail::read_integer<std::uint64_t>(input, offset);
+    const auto price = detail::read_integer<std::int64_t>(input, offset);
+    const auto quantity = detail::read_integer<std::uint64_t>(input, offset);
+    const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
+    if (!buy_order_id || !sell_order_id || !price || !quantity || !sequence_number || *quantity == 0) return std::nullopt;
+    return Level3OrderExecuted {
+        .buy_order_id = *buy_order_id,
+        .sell_order_id = *sell_order_id,
+        .price = *price,
+        .quantity = *quantity,
+        .sequence_number = *sequence_number
+    };
+}
+
+inline std::array<std::byte, level3_order_deleted_body_size>
+encode_level3_order_deleted(const Level3OrderDeleted& event) {
+    std::array<std::byte, level3_order_deleted_body_size> output {};
+    std::size_t offset = 0;
+    detail::write_integer(output, offset, event.order_id);
+    detail::write_integer(output, offset, event.sequence_number);
+    return output;
+}
+
+inline std::optional<Level3OrderDeleted> decode_level3_order_deleted(
+    std::span<const std::byte> input
+) {
+    if (input.size() != level3_order_deleted_body_size) return std::nullopt;
+    std::size_t offset = 0;
+    const auto order_id = detail::read_integer<std::uint64_t>(input, offset);
+    const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
+    if (!order_id || !sequence_number) return std::nullopt;
+    return Level3OrderDeleted {
+        .order_id = *order_id,
         .sequence_number = *sequence_number
     };
 }

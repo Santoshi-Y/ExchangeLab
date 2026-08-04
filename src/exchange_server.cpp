@@ -4,11 +4,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
+#include "exchange/journal.hpp"
 #include "exchange/order.hpp"
 #include "exchange/protocol.hpp"
 #include "exchange/types.hpp"
@@ -75,10 +80,20 @@ std::vector<std::byte> combine_message(
 
 }  // namespace
 
-ExchangeServer::ExchangeServer(std::uint16_t port)
+ExchangeServer::ExchangeServer(
+    std::uint16_t port,
+    std::optional<std::filesystem::path> journal_path
+)
     : server_(port),
       running_(false),
-      next_sequence_number_(1) {}
+      next_sequence_number_(1) {
+    if (journal_path.has_value()) {
+        journal_ =
+            std::make_unique<ExchangeJournal>(
+                *journal_path
+            );
+    }
+}
 
 ExchangeServer::~ExchangeServer() {
     stop();
@@ -146,17 +161,19 @@ void ExchangeServer::stop() {
     const bool was_running =
         running_.exchange(false);
 
-    if (!was_running) {
-        return;
+    if (was_running) {
+        server_.stop();
+
+        const std::vector<int> sockets =
+            client_socket_snapshot();
+
+        for (const int socket : sockets) {
+            TcpServer::close_connection(socket);
+        }
     }
 
-    server_.stop();
-
-    const std::vector<int> sockets =
-        client_socket_snapshot();
-
-    for (const int socket : sockets) {
-        TcpServer::close_connection(socket);
+    if (journal_ != nullptr) {
+        journal_->flush();
     }
 }
 
@@ -165,12 +182,6 @@ void ExchangeServer::handle_client(
 ) {
     std::vector<std::byte> receive_buffer;
 
-    /*
-     * This buffer belongs only to this client thread.
-     *
-     * It stores up to eight trades inline and retains
-     * overflow capacity after a larger sweep.
-     */
     MatchingEngine::BufferedTrades trade_buffer;
 
     while (running_.load()) {
@@ -221,7 +232,7 @@ void ExchangeServer::process_receive_buffer(
         const auto header =
             protocol::decode_header(header_bytes);
 
-        if (!header) {
+        if (!header.has_value()) {
             std::cerr
                 << "Invalid protocol header\n";
 
@@ -258,12 +269,36 @@ void ExchangeServer::process_receive_buffer(
             )
         };
 
-        handle_message(
-            client_socket,
-            *header,
-            body,
-            trade_buffer
-        );
+        if (journal_ != nullptr) {
+            const std::vector<std::byte>
+                complete_message(
+                    receive_buffer.begin(),
+                    receive_buffer.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            full_message_size
+                        )
+                );
+
+            std::lock_guard<std::mutex> journal_lock(
+                journal_processing_mutex_
+            );
+
+            journal_->append(complete_message);
+
+            handle_message(
+                client_socket,
+                *header,
+                body,
+                trade_buffer
+            );
+        } else {
+            handle_message(
+                client_socket,
+                *header,
+                body,
+                trade_buffer
+            );
+        }
 
         receive_buffer.erase(
             receive_buffer.begin(),
@@ -326,7 +361,7 @@ void ExchangeServer::handle_new_order(
     const auto request =
         protocol::decode_new_order(body);
 
-    if (!request) {
+    if (!request.has_value()) {
         send_order_response(
             client_socket,
             0,
@@ -359,6 +394,9 @@ void ExchangeServer::handle_new_order(
     bool accepted = false;
 
     std::vector<ExecutionDelivery> deliveries;
+    std::vector<protocol::Level3OrderExecuted> level3_executions;
+    std::vector<protocol::Level3OrderDeleted> level3_deletions;
+    std::optional<protocol::Level3AddOrder> level3_add;
 
     BookSnapshot snapshot {
         .has_bid = false,
@@ -392,7 +430,10 @@ void ExchangeServer::handle_new_order(
                         request->order_type
                     ),
                 .time_in_force =
-                    TimeInForce::GoodTillCancel,
+                    request->order_type ==
+                            protocol::OrderType::Market
+                        ? TimeInForce::ImmediateOrCancel
+                        : TimeInForce::GoodTillCancel,
                 .price = request->price,
                 .initial_quantity = quantity,
                 .remaining_quantity = quantity,
@@ -411,6 +452,8 @@ void ExchangeServer::handle_new_order(
                 trade_buffer.size()
             );
 
+            std::unordered_set<OrderId> deleted_order_ids;
+
             for (const Trade& trade : trade_buffer) {
                 deliveries.push_back({
                     .trade = trade,
@@ -427,6 +470,35 @@ void ExchangeServer::handle_new_order(
                             client_socket
                         )
                 });
+
+                level3_executions.push_back({
+                    .buy_order_id = trade.buy_order_id,
+                    .sell_order_id = trade.sell_order_id,
+                    .price = static_cast<std::int64_t>(trade.price),
+                    .quantity = static_cast<std::uint64_t>(trade.quantity),
+                    .sequence_number = 0
+                });
+
+                if (
+                    trade.buy_order_id != request->order_id &&
+                    book_.find_order(trade.buy_order_id) == nullptr
+                ) {
+                    deleted_order_ids.insert(trade.buy_order_id);
+                }
+
+                if (
+                    trade.sell_order_id != request->order_id &&
+                    book_.find_order(trade.sell_order_id) == nullptr
+                ) {
+                    deleted_order_ids.insert(trade.sell_order_id);
+                }
+            }
+
+            for (const OrderId deleted_order_id : deleted_order_ids) {
+                level3_deletions.push_back({
+                    .order_id = deleted_order_id,
+                    .sequence_number = 0
+                });
             }
 
             remove_filled_order_owners(
@@ -442,6 +514,24 @@ void ExchangeServer::handle_new_order(
                 order_owners_[
                     request->order_id
                 ] = client_socket;
+
+                const Order* resting_order =
+                    book_.find_order(request->order_id);
+
+                level3_add = protocol::Level3AddOrder {
+                    .order_id = resting_order->id,
+                    .timestamp = resting_order->timestamp,
+                    .price = static_cast<std::int64_t>(
+                        resting_order->price
+                    ),
+                    .quantity = static_cast<std::uint64_t>(
+                        resting_order->remaining_quantity
+                    ),
+                    .side = resting_order->side == Side::Buy
+                        ? protocol::Side::Buy
+                        : protocol::Side::Sell,
+                    .sequence_number = 0
+                };
             }
 
             snapshot = capture_book_snapshot();
@@ -476,6 +566,18 @@ void ExchangeServer::handle_new_order(
 
     send_execution_deliveries(deliveries);
     broadcast_book_update(snapshot);
+
+    for (const auto& event : level3_executions) {
+        broadcast_level3_order_executed(event);
+    }
+
+    for (const auto& event : level3_deletions) {
+        broadcast_level3_order_deleted(event);
+    }
+
+    if (level3_add.has_value()) {
+        broadcast_level3_add_order(*level3_add);
+    }
 }
 
 void ExchangeServer::send_order_response(
@@ -526,9 +628,9 @@ void ExchangeServer::send_order_response(
             response_body
         );
 
-    std::lock_guard<std::mutex> send_lock {
+    std::lock_guard<std::mutex> send_lock(
         send_mutex_
-    };
+    );
 
     if (
         !TcpServer::send_to(
@@ -595,9 +697,9 @@ void ExchangeServer::send_trade_execution(
             response_body
         );
 
-    std::lock_guard<std::mutex> send_lock {
+    std::lock_guard<std::mutex> send_lock(
         send_mutex_
-    };
+    );
 
     if (
         !TcpServer::send_to(
@@ -677,7 +779,8 @@ void ExchangeServer::broadcast_book_update(
     const protocol::MessageHeader header {
         .magic = protocol::protocol_magic,
         .version = protocol::protocol_version,
-        .type = protocol::MessageType::BookUpdate,
+        .type =
+            protocol::MessageType::BookUpdate,
         .body_size =
             static_cast<std::uint32_t>(
                 body.size()
@@ -697,9 +800,9 @@ void ExchangeServer::broadcast_book_update(
     const std::vector<int> clients =
         client_socket_snapshot();
 
-    std::lock_guard<std::mutex> send_lock {
+    std::lock_guard<std::mutex> send_lock(
         send_mutex_
-    };
+    );
 
     for (const int socket : clients) {
         if (
@@ -716,6 +819,102 @@ void ExchangeServer::broadcast_book_update(
     }
 }
 
+void ExchangeServer::broadcast_level3_add_order(
+    const protocol::Level3AddOrder& event
+) {
+    protocol::Level3AddOrder sequenced_event = event;
+    sequenced_event.sequence_number =
+        next_sequence_number_.fetch_add(1);
+
+    const auto body =
+        protocol::encode_level3_add_order(sequenced_event);
+
+    const protocol::MessageHeader header {
+        .magic = protocol::protocol_magic,
+        .version = protocol::protocol_version,
+        .type = protocol::MessageType::Level3AddOrder,
+        .body_size = static_cast<std::uint32_t>(body.size()),
+        .sequence_number = sequenced_event.sequence_number
+    };
+
+    const auto encoded_header = protocol::encode_header(header);
+    const std::vector<std::byte> message =
+        combine_message(encoded_header, body);
+    const std::vector<int> clients = client_socket_snapshot();
+
+    std::lock_guard<std::mutex> send_lock(send_mutex_);
+    for (const int socket : clients) {
+        if (!TcpServer::send_to(socket, message)) {
+            std::cerr << "Failed to send Level-3 add event to socket "
+                      << socket << '\n';
+        }
+    }
+}
+
+void ExchangeServer::broadcast_level3_order_executed(
+    const protocol::Level3OrderExecuted& event
+) {
+    protocol::Level3OrderExecuted sequenced_event = event;
+    sequenced_event.sequence_number =
+        next_sequence_number_.fetch_add(1);
+
+    const auto body =
+        protocol::encode_level3_order_executed(sequenced_event);
+
+    const protocol::MessageHeader header {
+        .magic = protocol::protocol_magic,
+        .version = protocol::protocol_version,
+        .type = protocol::MessageType::Level3OrderExecuted,
+        .body_size = static_cast<std::uint32_t>(body.size()),
+        .sequence_number = sequenced_event.sequence_number
+    };
+
+    const auto encoded_header = protocol::encode_header(header);
+    const std::vector<std::byte> message =
+        combine_message(encoded_header, body);
+    const std::vector<int> clients = client_socket_snapshot();
+
+    std::lock_guard<std::mutex> send_lock(send_mutex_);
+    for (const int socket : clients) {
+        if (!TcpServer::send_to(socket, message)) {
+            std::cerr << "Failed to send Level-3 execution event to socket "
+                      << socket << '\n';
+        }
+    }
+}
+
+void ExchangeServer::broadcast_level3_order_deleted(
+    const protocol::Level3OrderDeleted& event
+) {
+    protocol::Level3OrderDeleted sequenced_event = event;
+    sequenced_event.sequence_number =
+        next_sequence_number_.fetch_add(1);
+
+    const auto body =
+        protocol::encode_level3_order_deleted(sequenced_event);
+
+    const protocol::MessageHeader header {
+        .magic = protocol::protocol_magic,
+        .version = protocol::protocol_version,
+        .type = protocol::MessageType::Level3OrderDeleted,
+        .body_size = static_cast<std::uint32_t>(body.size()),
+        .sequence_number = sequenced_event.sequence_number
+    };
+
+    const auto encoded_header = protocol::encode_header(header);
+    const std::vector<std::byte> message =
+        combine_message(encoded_header, body);
+    const std::vector<int> clients = client_socket_snapshot();
+
+    std::lock_guard<std::mutex> send_lock(send_mutex_);
+    for (const int socket : clients) {
+        if (!TcpServer::send_to(socket, message)) {
+            std::cerr << "Failed to send Level-3 delete event to socket "
+                      << socket << '\n';
+        }
+    }
+}
+
 ExchangeServer::BookSnapshot
 ExchangeServer::capture_book_snapshot() const {
     BookSnapshot snapshot {
@@ -728,7 +927,8 @@ ExchangeServer::capture_book_snapshot() const {
     };
 
     if (snapshot.has_bid) {
-        snapshot.best_bid = book_.best_bid();
+        snapshot.best_bid =
+            book_.best_bid();
 
         snapshot.bid_quantity =
             book_.best_bid_level()
@@ -736,7 +936,8 @@ ExchangeServer::capture_book_snapshot() const {
     }
 
     if (snapshot.has_ask) {
-        snapshot.best_ask = book_.best_ask();
+        snapshot.best_ask =
+            book_.best_ask();
 
         snapshot.ask_quantity =
             book_.best_ask_level()
@@ -799,9 +1000,9 @@ void ExchangeServer::remove_filled_order_owners(
 void ExchangeServer::register_client(
     int client_socket
 ) {
-    std::lock_guard<std::mutex> lock {
+    std::lock_guard<std::mutex> lock(
         clients_mutex_
-    };
+    );
 
     client_sockets_.push_back(client_socket);
 }
@@ -809,9 +1010,9 @@ void ExchangeServer::register_client(
 void ExchangeServer::unregister_client(
     int client_socket
 ) {
-    std::lock_guard<std::mutex> lock {
+    std::lock_guard<std::mutex> lock(
         clients_mutex_
-    };
+    );
 
     const auto position = std::find(
         client_sockets_.begin(),
@@ -826,9 +1027,9 @@ void ExchangeServer::unregister_client(
 
 std::vector<int>
 ExchangeServer::client_socket_snapshot() {
-    std::lock_guard<std::mutex> lock {
+    std::lock_guard<std::mutex> lock(
         clients_mutex_
-    };
+    );
 
     return client_sockets_;
 }
