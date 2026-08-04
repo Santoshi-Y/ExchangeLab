@@ -165,6 +165,14 @@ void ExchangeServer::handle_client(
 ) {
     std::vector<std::byte> receive_buffer;
 
+    /*
+     * This buffer belongs only to this client thread.
+     *
+     * It stores up to eight trades inline and retains
+     * overflow capacity after a larger sweep.
+     */
+    MatchingEngine::BufferedTrades trade_buffer;
+
     while (running_.load()) {
         const std::vector<std::byte> bytes =
             TcpServer::receive_from(client_socket);
@@ -181,7 +189,8 @@ void ExchangeServer::handle_client(
 
         process_receive_buffer(
             client_socket,
-            receive_buffer
+            receive_buffer,
+            trade_buffer
         );
     }
 
@@ -196,7 +205,8 @@ void ExchangeServer::handle_client(
 
 void ExchangeServer::process_receive_buffer(
     int client_socket,
-    std::vector<std::byte>& receive_buffer
+    std::vector<std::byte>& receive_buffer,
+    MatchingEngine::BufferedTrades& trade_buffer
 ) {
     while (
         receive_buffer.size() >=
@@ -251,7 +261,8 @@ void ExchangeServer::process_receive_buffer(
         handle_message(
             client_socket,
             *header,
-            body
+            body,
+            trade_buffer
         );
 
         receive_buffer.erase(
@@ -267,14 +278,16 @@ void ExchangeServer::process_receive_buffer(
 void ExchangeServer::handle_message(
     int client_socket,
     const protocol::MessageHeader& header,
-    std::span<const std::byte> body
+    std::span<const std::byte> body,
+    MatchingEngine::BufferedTrades& trade_buffer
 ) {
     switch (header.type) {
         case protocol::MessageType::NewOrder:
             handle_new_order(
                 client_socket,
                 header,
-                body
+                body,
+                trade_buffer
             );
             break;
 
@@ -294,7 +307,8 @@ void ExchangeServer::handle_message(
 void ExchangeServer::handle_new_order(
     int client_socket,
     const protocol::MessageHeader& header,
-    std::span<const std::byte> body
+    std::span<const std::byte> body,
+    MatchingEngine::BufferedTrades& trade_buffer
 ) {
     if (
         header.body_size !=
@@ -385,17 +399,19 @@ void ExchangeServer::handle_new_order(
                 .timestamp = request->timestamp
             };
 
-            const std::vector<Trade> trades =
-                engine_.process_order(
-                    book_,
-                    order
-                );
+            engine_.process_order_into(
+                book_,
+                order,
+                trade_buffer
+            );
 
             accepted = true;
 
-            deliveries.reserve(trades.size());
+            deliveries.reserve(
+                trade_buffer.size()
+            );
 
-            for (const Trade& trade : trades) {
+            for (const Trade& trade : trade_buffer) {
                 deliveries.push_back({
                     .trade = trade,
                     .buyer_socket =
@@ -414,7 +430,7 @@ void ExchangeServer::handle_new_order(
             }
 
             remove_filled_order_owners(
-                trades,
+                trade_buffer,
                 request->order_id
             );
 
@@ -429,6 +445,8 @@ void ExchangeServer::handle_new_order(
             }
 
             snapshot = capture_book_snapshot();
+        } else {
+            trade_buffer.clear();
         }
     }
 
@@ -711,14 +729,18 @@ ExchangeServer::capture_book_snapshot() const {
 
     if (snapshot.has_bid) {
         snapshot.best_bid = book_.best_bid();
+
         snapshot.bid_quantity =
-            book_.best_bid_level().total_quantity();
+            book_.best_bid_level()
+                .total_quantity();
     }
 
     if (snapshot.has_ask) {
         snapshot.best_ask = book_.best_ask();
+
         snapshot.ask_quantity =
-            book_.best_ask_level().total_quantity();
+            book_.best_ask_level()
+                .total_quantity();
     }
 
     return snapshot;
@@ -744,12 +766,13 @@ int ExchangeServer::find_order_owner(
 }
 
 void ExchangeServer::remove_filled_order_owners(
-    const std::vector<Trade>& trades,
+    const MatchingEngine::BufferedTrades& trades,
     OrderId incoming_order_id
 ) {
     for (const Trade& trade : trades) {
         if (
-            trade.buy_order_id != incoming_order_id &&
+            trade.buy_order_id !=
+                incoming_order_id &&
             book_.find_order(
                 trade.buy_order_id
             ) == nullptr
@@ -760,7 +783,8 @@ void ExchangeServer::remove_filled_order_owners(
         }
 
         if (
-            trade.sell_order_id != incoming_order_id &&
+            trade.sell_order_id !=
+                incoming_order_id &&
             book_.find_order(
                 trade.sell_order_id
             ) == nullptr

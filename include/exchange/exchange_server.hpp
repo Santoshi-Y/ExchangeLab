@@ -56,19 +56,22 @@ private:
 
     void process_receive_buffer(
         int client_socket,
-        std::vector<std::byte>& receive_buffer
+        std::vector<std::byte>& receive_buffer,
+        MatchingEngine::BufferedTrades& trade_buffer
     );
 
     void handle_message(
         int client_socket,
         const protocol::MessageHeader& header,
-        std::span<const std::byte> body
+        std::span<const std::byte> body,
+        MatchingEngine::BufferedTrades& trade_buffer
     );
 
     void handle_new_order(
         int client_socket,
         const protocol::MessageHeader& header,
-        std::span<const std::byte> body
+        std::span<const std::byte> body,
+        MatchingEngine::BufferedTrades& trade_buffer
     );
 
     void send_order_response(
@@ -90,8 +93,8 @@ private:
         const BookSnapshot& snapshot
     );
 
-    [[nodiscard]] BookSnapshot capture_book_snapshot()
-        const;
+    [[nodiscard]] BookSnapshot
+    capture_book_snapshot() const;
 
     [[nodiscard]] int find_order_owner(
         OrderId order_id,
@@ -100,7 +103,7 @@ private:
     ) const;
 
     void remove_filled_order_owners(
-        const std::vector<Trade>& trades,
+        const MatchingEngine::BufferedTrades& trades,
         OrderId incoming_order_id
     );
 
