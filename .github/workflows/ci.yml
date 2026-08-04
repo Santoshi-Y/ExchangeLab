@@ -1,0 +1,49 @@
+name: ExchangeLab CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+        build_type:
+          - Debug
+          - Release
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: >
+          cmake
+          -S .
+          -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DEXCHANGELAB_BUILD_TESTS=ON
+          -DEXCHANGELAB_BUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j 2
+
+      - name: Run tests
+        run: >
+          ctest
+          --test-dir build
+          --build-config ${{ matrix.build_type }}
+          --output-on-failure
