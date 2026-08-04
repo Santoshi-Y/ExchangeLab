@@ -207,6 +207,18 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
     )
 
     add_executable(
+        exchange_lab_execution_latency
+        benchmarks/end_to_end_execution_latency.cpp
+    )
+
+    target_link_libraries(
+        exchange_lab_execution_latency
+        PRIVATE
+            exchange_lab_lib
+            Threads::Threads
+    )
+
+    add_executable(
         exchange_lab_allocation_profile
         benchmarks/allocation_profile.cpp
     )
@@ -236,6 +248,14 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
         )
 
         target_compile_options(
+            exchange_lab_execution_latency
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+        )
+
+        target_compile_options(
             exchange_lab_allocation_profile
             PRIVATE
                 -Wall
@@ -251,6 +271,12 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
 
         target_compile_options(
             exchange_lab_latency_benchmark
+            PRIVATE
+                /W4
+        )
+
+        target_compile_options(
+            exchange_lab_execution_latency
             PRIVATE
                 /W4
         )
