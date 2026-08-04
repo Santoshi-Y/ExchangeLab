@@ -78,10 +78,25 @@ private:
         MatchingEngine::BufferedTrades& trade_buffer
     );
 
+    void handle_cancel_order(
+        int client_socket,
+        const protocol::MessageHeader& header,
+        std::span<const std::byte> body
+    );
+
+    void handle_replace_order(
+        int client_socket,
+        const protocol::MessageHeader& header,
+        std::span<const std::byte> body,
+        MatchingEngine::BufferedTrades& trade_buffer
+    );
+
     void send_order_response(
         int client_socket,
         std::uint64_t order_id,
-        bool success
+        bool success,
+        protocol::MessageType success_type =
+            protocol::MessageType::OrderAccepted
     );
 
     void send_trade_execution(
