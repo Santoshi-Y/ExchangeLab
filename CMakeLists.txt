@@ -206,6 +206,18 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
             Threads::Threads
     )
 
+    add_executable(
+        exchange_lab_allocation_profile
+        benchmarks/allocation_profile.cpp
+    )
+
+    target_link_libraries(
+        exchange_lab_allocation_profile
+        PRIVATE
+            exchange_lab_lib
+            Threads::Threads
+    )
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(
             exchange_lab_benchmarks
@@ -222,6 +234,14 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
                 -Wextra
                 -Wpedantic
         )
+
+        target_compile_options(
+            exchange_lab_allocation_profile
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+        )
     elseif(MSVC)
         target_compile_options(
             exchange_lab_benchmarks
@@ -231,6 +251,12 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
 
         target_compile_options(
             exchange_lab_latency_benchmark
+            PRIVATE
+                /W4
+        )
+
+        target_compile_options(
+            exchange_lab_allocation_profile
             PRIVATE
                 /W4
         )
