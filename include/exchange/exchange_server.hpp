@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +19,7 @@
 #include "exchange/matching_engine.hpp"
 #include "exchange/multicast_publisher.hpp"
 #include "exchange/order_book.hpp"
+#include "exchange/performance_metrics.hpp"
 #include "exchange/protocol.hpp"
 #include "exchange/risk_engine.hpp"
 #include "exchange/tcp_server.hpp"
@@ -46,7 +49,8 @@ public:
             std::nullopt,
         std::optional<MulticastConfig> multicast_config =
             std::nullopt,
-        RiskLimits risk_limits = {}
+        RiskLimits risk_limits = {},
+        PerformanceTelemetryConfig performance_config = {}
     );
 
     ~ExchangeServer();
@@ -108,6 +112,8 @@ private:
     };
 
     [[nodiscard]] bool recover_from_journal();
+
+    void performance_loop();
 
     void handle_client(int client_socket);
 
@@ -232,6 +238,7 @@ private:
     TcpServer server_;
     MatchingEngine engine_;
     RiskEngine risk_engine_;
+    PerformanceMetrics performance_metrics_;
 
     std::mutex engine_mutex_;
     std::unordered_map<std::string, InstrumentState> instruments_;
@@ -248,6 +255,15 @@ private:
 
     std::optional<MulticastConfig> multicast_config_;
     std::unique_ptr<MulticastPublisher> multicast_publisher_;
+
+    PerformanceTelemetryConfig performance_config_;
+    std::unique_ptr<PerformanceTelemetryPublisher>
+        performance_publisher_;
+    std::thread performance_thread_;
+    std::chrono::steady_clock::time_point performance_start_time_;
+    std::mutex performance_wait_mutex_;
+    std::condition_variable performance_cv_;
+
     std::mutex journal_processing_mutex_;
 
     RecoveryState recovery_state_;

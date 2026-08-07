@@ -7,7 +7,8 @@ int main() {
     const exchange::WebSocketGatewayConfig config {
         .websocket_port = 8080,
         .multicast_group = "239.255.0.1",
-        .multicast_port = 9100
+        .multicast_port = 9100,
+        .performance_port = 9200
     };
 
     exchange::WebSocketGateway gateway(config);
@@ -29,6 +30,9 @@ int main() {
         << config.multicast_group
         << ':'
         << config.multicast_port
+        << '\n'
+        << "Performance source: 127.0.0.1:"
+        << config.performance_port
         << '\n';
 
     gateway.run();

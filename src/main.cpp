@@ -4,6 +4,7 @@
 
 #include "exchange/exchange_server.hpp"
 #include "exchange/protocol.hpp"
+#include "exchange/performance_metrics.hpp"
 #include "exchange/risk_engine.hpp"
 
 int main() {
@@ -20,11 +21,17 @@ int main() {
 
     const exchange::RiskLimits risk_limits {};
 
+    const exchange::PerformanceTelemetryConfig performance_telemetry {
+        .host = "127.0.0.1",
+        .port = 9200
+    };
+
     exchange::ExchangeServer server(
         port,
         journal_path,
         multicast,
-        risk_limits
+        risk_limits,
+        performance_telemetry
     );
 
     if (!server.start()) {
@@ -82,6 +89,11 @@ int main() {
         << multicast.group
         << ':'
         << multicast.port
+        << '\n'
+        << "Performance telemetry: "
+        << performance_telemetry.host
+        << ':'
+        << performance_telemetry.port
         << '\n'
         << "Risk limits:\n"
         << "  Max order quantity: "

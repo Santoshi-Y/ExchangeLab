@@ -417,36 +417,6 @@ std::vector<std::byte> websocket_text_frame(
     return frame;
 }
 
-std::string json_escape(
-    std::string_view value
-) {
-    std::string output;
-
-    for (const char character : value) {
-        switch (character) {
-            case '"':
-                output += "\\\"";
-                break;
-            case '\\':
-                output += "\\\\";
-                break;
-            case '\n':
-                output += "\\n";
-                break;
-            case '\r':
-                output += "\\r";
-                break;
-            case '\t':
-                output += "\\t";
-                break;
-            default:
-                output.push_back(character);
-                break;
-        }
-    }
-
-    return output;
-}
 
 }  // namespace
 
@@ -497,6 +467,14 @@ bool WebSocketGateway::start() {
         return false;
     }
 
+    if (!open_performance_receiver()) {
+        ::close(multicast_socket_);
+        multicast_socket_ = -1;
+        ::close(listen_socket_);
+        listen_socket_ = -1;
+        return false;
+    }
+
     running_.store(true);
 
     try {
@@ -507,6 +485,11 @@ bool WebSocketGateway::start() {
 
         multicast_thread_ = std::thread(
             &WebSocketGateway::multicast_loop,
+            this
+        );
+
+        performance_thread_ = std::thread(
+            &WebSocketGateway::performance_loop,
             this
         );
     } catch (...) {
@@ -525,6 +508,10 @@ void WebSocketGateway::run() {
     if (multicast_thread_.joinable()) {
         multicast_thread_.join();
     }
+
+    if (performance_thread_.joinable()) {
+        performance_thread_.join();
+    }
 }
 
 void WebSocketGateway::stop() noexcept {
@@ -540,6 +527,12 @@ void WebSocketGateway::stop() noexcept {
         ::shutdown(multicast_socket_, SHUT_RDWR);
         ::close(multicast_socket_);
         multicast_socket_ = -1;
+    }
+
+    if (performance_socket_ >= 0) {
+        ::shutdown(performance_socket_, SHUT_RDWR);
+        ::close(performance_socket_);
+        performance_socket_ = -1;
     }
 
     {
@@ -570,6 +563,13 @@ void WebSocketGateway::stop() noexcept {
         multicast_thread_.get_id() != current
     ) {
         multicast_thread_.join();
+    }
+
+    if (
+        performance_thread_.joinable() &&
+        performance_thread_.get_id() != current
+    ) {
+        performance_thread_.join();
     }
 }
 
@@ -711,6 +711,53 @@ bool WebSocketGateway::open_multicast_receiver() {
     return true;
 }
 
+bool WebSocketGateway::open_performance_receiver() {
+    performance_socket_ = ::socket(
+        AF_INET,
+        SOCK_DGRAM,
+        0
+    );
+
+    if (performance_socket_ < 0) {
+        return false;
+    }
+
+    int enable = 1;
+
+    if (
+        ::setsockopt(
+            performance_socket_,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &enable,
+            sizeof(enable)
+        ) != 0
+    ) {
+        ::close(performance_socket_);
+        performance_socket_ = -1;
+        return false;
+    }
+
+    sockaddr_in address {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(config_.performance_port);
+
+    if (
+        ::bind(
+            performance_socket_,
+            reinterpret_cast<sockaddr*>(&address),
+            sizeof(address)
+        ) != 0
+    ) {
+        ::close(performance_socket_);
+        performance_socket_ = -1;
+        return false;
+    }
+
+    return true;
+}
+
 void WebSocketGateway::accept_loop() {
     while (running_.load()) {
         sockaddr_in client_address {};
@@ -786,6 +833,40 @@ void WebSocketGateway::multicast_loop() {
             market_data_to_json(datagram);
 
         if (!json.empty()) {
+            broadcast_text(json);
+        }
+    }
+}
+
+void WebSocketGateway::performance_loop() {
+    std::array<char, 8192> buffer {};
+
+    while (running_.load()) {
+        const auto received = ::recv(
+            performance_socket_,
+            buffer.data(),
+            buffer.size(),
+            0
+        );
+
+        if (received <= 0) {
+            if (running_.load()) {
+                std::cerr
+                    << "Performance telemetry receive failed\n";
+            }
+
+            break;
+        }
+
+        const std::string json(
+            buffer.data(),
+            static_cast<std::size_t>(received)
+        );
+
+        if (
+            json.find("\"type\":\"performance\"") !=
+            std::string::npos
+        ) {
             broadcast_text(json);
         }
     }

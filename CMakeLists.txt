@@ -20,6 +20,7 @@ add_library(
     src/tcp_server.cpp
     src/exchange_server.cpp
     src/risk_engine.cpp
+    src/performance_metrics.cpp
     src/multicast_publisher.cpp
     src/journal.cpp
     src/replay.cpp
@@ -348,6 +349,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/fix_gateway_test.cpp
         tests/memory_pool_test.cpp
         tests/lock_free_ring_test.cpp
+        tests/performance_metrics_test.cpp
         src/websocket_gateway.cpp
     )
 

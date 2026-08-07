@@ -14,6 +14,7 @@ struct WebSocketGatewayConfig {
     std::uint16_t websocket_port {8080};
     std::string multicast_group {"239.255.0.1"};
     std::uint16_t multicast_port {9100};
+    std::uint16_t performance_port {9200};
 };
 
 class WebSocketGateway {
@@ -38,9 +39,11 @@ public:
 private:
     [[nodiscard]] bool open_websocket_listener();
     [[nodiscard]] bool open_multicast_receiver();
+    [[nodiscard]] bool open_performance_receiver();
 
     void accept_loop();
     void multicast_loop();
+    void performance_loop();
 
     [[nodiscard]] bool perform_handshake(
         int client_socket
@@ -59,11 +62,13 @@ private:
 
     int listen_socket_ {-1};
     int multicast_socket_ {-1};
+    int performance_socket_ {-1};
 
     std::atomic<bool> running_ {false};
 
     std::thread accept_thread_;
     std::thread multicast_thread_;
+    std::thread performance_thread_;
 
     std::mutex clients_mutex_;
     std::vector<int> clients_;

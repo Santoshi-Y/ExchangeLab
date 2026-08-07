@@ -55,6 +55,46 @@ type MarketMessage =
   | ExecuteMessage
   | DeleteMessage;
 
+type PerformanceMessage = {
+  type: "performance";
+  timestampMs: number;
+  uptimeMs: number;
+  ordersTotal: number;
+  acceptedTotal: number;
+  rejectedTotal: number;
+  riskRejectedTotal: number;
+  cancelRequestsTotal: number;
+  successfulCancelsTotal: number;
+  replaceRequestsTotal: number;
+  successfulReplacesTotal: number;
+  tradesTotal: number;
+  tradedQuantity: number;
+  ordersPerSecond: number;
+  executionsPerSecond: number;
+  activeOrders: number;
+  instruments: number;
+  connectedClients: number;
+  matchingLatencyNs: {
+    samples: number;
+    mean: number;
+    p50: number;
+    p95: number;
+    p99: number;
+    max: number;
+  };
+  marketData: {
+    enqueued: number;
+    sent: number;
+    dropped: number;
+    sendErrors: number;
+    queueDepth: number;
+    maxQueueDepth: number;
+    queueCapacity: number;
+    producerShardsUsed: number;
+    producerRegistrationFailures: number;
+  };
+};
+
 type TopOfBook = {
   price: number;
   quantity: number;
@@ -70,6 +110,13 @@ type TapeItem = {
   sequence: number;
   symbol: string;
   text: string;
+};
+
+type HistoryPoint = {
+  ordersPerSecond: number;
+  executionsPerSecond: number;
+  p99LatencyNs: number;
+  queueDepth: number;
 };
 
 function emptyInstrument(): InstrumentView {
@@ -88,6 +135,8 @@ function App() {
   const [selectedSymbol, setSelectedSymbol] = useState("AAPL");
   const [tape, setTape] = useState<TapeItem[]>([]);
   const [lastSequence, setLastSequence] = useState(0);
+  const [performance, setPerformance] = useState<PerformanceMessage | null>(null);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const reconnectTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -114,7 +163,24 @@ function App() {
       };
 
       socket.onmessage = (event) => {
-        const message = JSON.parse(event.data) as MarketMessage;
+        const message = JSON.parse(event.data) as MarketMessage | PerformanceMessage;
+
+        if (message.type === "performance") {
+          setPerformance(message);
+          setHistory((previous) =>
+            [
+              ...previous,
+              {
+                ordersPerSecond: message.ordersPerSecond,
+                executionsPerSecond: message.executionsPerSecond,
+                p99LatencyNs: message.matchingLatencyNs.p99,
+                queueDepth: message.marketData.queueDepth,
+              },
+            ].slice(-60)
+          );
+          return;
+        }
+
         setLastSequence(message.sequence);
 
         setInstruments((previous) => {
@@ -214,10 +280,7 @@ function App() {
   );
 
   useEffect(() => {
-    if (
-      symbols.length > 0 &&
-      !instruments.has(selectedSymbol)
-    ) {
+    if (symbols.length > 0 && !instruments.has(selectedSymbol)) {
       setSelectedSymbol(symbols[0]);
     }
   }, [instruments, selectedSymbol, symbols]);
@@ -247,12 +310,18 @@ function App() {
       ? ((selected.bestBid.price + selected.bestAsk.price) / 2).toFixed(2)
       : "—";
 
+  const orderRateHistory = history.map((point) => point.ordersPerSecond);
+  const executionRateHistory = history.map((point) => point.executionsPerSecond);
+  const latencyHistory = history.map((point) => point.p99LatencyNs);
+  const queueHistory = history.map((point) => point.queueDepth);
+
   return (
     <main className="shell">
       <header>
         <div>
           <p className="eyebrow">LOW-LATENCY MULTI-SYMBOL EXCHANGE SIMULATOR</p>
           <h1>ExchangeLab</h1>
+          <p className="subtitle">Live market data + exchange performance telemetry</p>
         </div>
 
         <div className="status-group">
@@ -261,8 +330,96 @@ function App() {
             {connected ? "WebSocket connected" : "Disconnected"}
           </span>
           <span className="sequence">SEQ {lastSequence || "—"}</span>
+          <span className="sequence">
+            UPTIME {performance ? formatUptime(performance.uptimeMs) : "—"}
+          </span>
         </div>
       </header>
+
+      <section className="section-heading">
+        <div>
+          <span className="section-kicker">ENGINE</span>
+          <h2>Performance</h2>
+        </div>
+        <span className="live-note">1-second telemetry snapshots</span>
+      </section>
+
+      <section className="performance-metrics">
+        <Metric
+          label="Order Rate"
+          value={performance ? formatRate(performance.ordersPerSecond) : "—"}
+          sub={`${performance?.ordersTotal ?? 0} total new orders`}
+        />
+        <Metric
+          label="Execution Rate"
+          value={performance ? formatRate(performance.executionsPerSecond) : "—"}
+          sub={`${performance?.tradesTotal ?? 0} total trades`}
+        />
+        <Metric
+          label="Matching p50"
+          value={performance ? formatLatency(performance.matchingLatencyNs.p50) : "—"}
+          sub={performance ? `mean ${formatLatency(performance.matchingLatencyNs.mean)}` : "No samples"}
+        />
+        <Metric
+          label="Matching p95"
+          value={performance ? formatLatency(performance.matchingLatencyNs.p95) : "—"}
+          sub={`${performance?.matchingLatencyNs.samples ?? 0} samples`}
+        />
+        <Metric
+          label="Matching p99"
+          value={performance ? formatLatency(performance.matchingLatencyNs.p99) : "—"}
+          sub={performance ? `max ${formatLatency(performance.matchingLatencyNs.max)}` : "No samples"}
+        />
+        <Metric
+          label="Active Orders"
+          value={`${performance?.activeOrders ?? 0}`}
+          sub={`${performance?.instruments ?? symbols.length} instruments`}
+        />
+      </section>
+
+      <section className="charts-grid">
+        <ChartCard
+          title="Order throughput"
+          value={performance ? formatRate(performance.ordersPerSecond) : "—"}
+          data={orderRateHistory}
+        />
+        <ChartCard
+          title="Executions"
+          value={performance ? formatRate(performance.executionsPerSecond) : "—"}
+          data={executionRateHistory}
+        />
+        <ChartCard
+          title="p99 matching latency"
+          value={performance ? formatLatency(performance.matchingLatencyNs.p99) : "—"}
+          data={latencyHistory}
+        />
+        <ChartCard
+          title="Market-data queue"
+          value={performance ? `${performance.marketData.queueDepth}` : "—"}
+          data={queueHistory}
+          detail={performance ? `/ ${performance.marketData.queueCapacity} slots` : "queue depth"}
+        />
+      </section>
+
+      <section className="health-grid">
+        <HealthItem label="Connected clients" value={`${performance?.connectedClients ?? 0}`} />
+        <HealthItem label="Accepted orders" value={`${performance?.acceptedTotal ?? 0}`} />
+        <HealthItem label="Rejected orders" value={`${performance?.rejectedTotal ?? 0}`} />
+        <HealthItem label="Risk rejects" value={`${performance?.riskRejectedTotal ?? 0}`} />
+        <HealthItem label="Traded quantity" value={formatInteger(performance?.tradedQuantity ?? 0)} />
+        <HealthItem label="MD sent" value={formatInteger(performance?.marketData.sent ?? 0)} />
+        <HealthItem label="MD dropped" value={formatInteger(performance?.marketData.dropped ?? 0)} warn={(performance?.marketData.dropped ?? 0) > 0} />
+        <HealthItem label="Send errors" value={formatInteger(performance?.marketData.sendErrors ?? 0)} warn={(performance?.marketData.sendErrors ?? 0) > 0} />
+        <HealthItem label="Queue high-water" value={`${performance?.marketData.maxQueueDepth ?? 0}`} />
+        <HealthItem label="Producer shards" value={`${performance?.marketData.producerShardsUsed ?? 0}`} />
+      </section>
+
+      <section className="section-heading market-heading">
+        <div>
+          <span className="section-kicker">MARKET</span>
+          <h2>Live Order Book</h2>
+        </div>
+      </section>
 
       <section className="symbol-bar">
         <span>Instrument</span>
@@ -286,17 +443,13 @@ function App() {
         </div>
       </section>
 
-      <section className="metrics">
+      <section className="market-metrics">
         <Metric
           label={`${selectedSymbol} Best Bid`}
           value={selected.bestBid ? `${selected.bestBid.price}` : "—"}
           sub={selected.bestBid ? `${selected.bestBid.quantity} units` : "No bid"}
         />
-        <Metric
-          label="Midpoint"
-          value={midpoint}
-          sub={selectedSymbol}
-        />
+        <Metric label="Midpoint" value={midpoint} sub={selectedSymbol} />
         <Metric
           label={`${selectedSymbol} Best Ask`}
           value={selected.bestAsk ? `${selected.bestAsk.price}` : "—"}
@@ -365,6 +518,79 @@ function Metric({
   );
 }
 
+function HealthItem({
+  label,
+  value,
+  warn = false,
+}: {
+  label: string;
+  value: string;
+  warn?: boolean;
+}) {
+  return (
+    <div className={`health-item ${warn ? "warning" : ""}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ChartCard({
+  title,
+  value,
+  data,
+  detail = "last 60 seconds",
+}: {
+  title: string;
+  value: string;
+  data: number[];
+  detail?: string;
+}) {
+  return (
+    <div className="chart-card">
+      <div className="chart-header">
+        <div>
+          <span>{title}</span>
+          <strong>{value}</strong>
+        </div>
+        <small>{detail}</small>
+      </div>
+      <Sparkline data={data} />
+    </div>
+  );
+}
+
+function Sparkline({ data }: { data: number[] }) {
+  const points = useMemo(() => {
+    if (data.length === 0) return "";
+
+    const minimum = Math.min(...data);
+    const maximum = Math.max(...data);
+    const range = Math.max(maximum - minimum, 1);
+    const divisor = Math.max(data.length - 1, 1);
+
+    return data
+      .map((value, index) => {
+        const x = (index / divisor) * 100;
+        const y = 30 - ((value - minimum) / range) * 26;
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(" ");
+  }, [data]);
+
+  return (
+    <div className="sparkline-wrap">
+      {points ? (
+        <svg className="sparkline" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
+          <polyline points={points} vectorEffect="non-scaling-stroke" />
+        </svg>
+      ) : (
+        <div className="sparkline-empty">Waiting for telemetry…</div>
+      )}
+    </div>
+  );
+}
+
 function BookSide({
   title,
   orders,
@@ -393,6 +619,35 @@ function BookSide({
       )}
     </div>
   );
+}
+
+function formatLatency(nanoseconds: number): string {
+  if (!Number.isFinite(nanoseconds) || nanoseconds <= 0) return "—";
+  if (nanoseconds < 1_000) return `${Math.round(nanoseconds)} ns`;
+  if (nanoseconds < 1_000_000) return `${(nanoseconds / 1_000).toFixed(2)} µs`;
+  return `${(nanoseconds / 1_000_000).toFixed(2)} ms`;
+}
+
+function formatRate(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M/s`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K/s`;
+  return `${value.toFixed(1)}/s`;
+}
+
+function formatInteger(value: number): string {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatUptime(milliseconds: number): string {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 export default App;

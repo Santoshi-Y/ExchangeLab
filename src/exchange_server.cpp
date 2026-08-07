@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -105,12 +106,15 @@ ExchangeServer::ExchangeServer(
     std::uint16_t port,
     std::optional<std::filesystem::path> journal_path,
     std::optional<MulticastConfig> multicast_config,
-    RiskLimits risk_limits
+    RiskLimits risk_limits,
+    PerformanceTelemetryConfig performance_config
 )
     : server_(port),
       risk_engine_(std::move(risk_limits)),
       journal_path_(std::move(journal_path)),
       multicast_config_(std::move(multicast_config)),
+      performance_config_(std::move(performance_config)),
+      performance_start_time_(std::chrono::steady_clock::now()),
       running_(false),
       next_sequence_number_(1),
       next_risk_client_id_(1) {}
@@ -283,7 +287,32 @@ bool ExchangeServer::start() {
         return false;
     }
 
+    performance_publisher_ =
+        std::make_unique<PerformanceTelemetryPublisher>(
+            performance_config_
+        );
+
+    if (!performance_publisher_->start()) {
+        std::cerr
+            << "Warning: performance telemetry publisher unavailable\n";
+        performance_publisher_.reset();
+    }
+
+    performance_start_time_ = std::chrono::steady_clock::now();
     running_.store(true);
+
+    if (performance_publisher_ != nullptr) {
+        try {
+            performance_thread_ = std::thread(
+                &ExchangeServer::performance_loop,
+                this
+            );
+        } catch (...) {
+            performance_publisher_->stop();
+            performance_publisher_.reset();
+        }
+    }
+
     return true;
 }
 
@@ -305,6 +334,137 @@ void ExchangeServer::set_global_kill_switch(
     );
 
     risk_engine_.set_global_kill_switch(enabled);
+}
+
+void ExchangeServer::performance_loop() {
+    using Clock = std::chrono::steady_clock;
+
+    auto previous_time = Clock::now();
+    PerformanceCounterSnapshot previous =
+        performance_metrics_.snapshot();
+
+    while (running_.load()) {
+        {
+            std::unique_lock<std::mutex> wait_lock(
+                performance_wait_mutex_
+            );
+
+            performance_cv_.wait_for(
+                wait_lock,
+                std::chrono::seconds(1),
+                [this] {
+                    return !running_.load();
+                }
+            );
+        }
+
+        if (!running_.load()) {
+            break;
+        }
+
+        const auto now = Clock::now();
+        const PerformanceCounterSnapshot current =
+            performance_metrics_.snapshot();
+
+        const double interval_seconds =
+            std::chrono::duration<double>(
+                now - previous_time
+            ).count();
+
+        std::uint64_t active_orders = 0;
+        std::uint64_t instrument_count = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                engine_mutex_
+            );
+
+            instrument_count = static_cast<std::uint64_t>(
+                instruments_.size()
+            );
+
+            for (const auto& [symbol, instrument] : instruments_) {
+                static_cast<void>(symbol);
+                active_orders += static_cast<std::uint64_t>(
+                    instrument.book.order_count()
+                );
+            }
+        }
+
+        std::uint64_t connected_clients = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                clients_mutex_
+            );
+
+            connected_clients = static_cast<std::uint64_t>(
+                client_sockets_.size()
+            );
+        }
+
+        MulticastPublisherStats market_data {};
+        std::uint64_t queue_capacity = 0;
+
+        if (multicast_publisher_ != nullptr) {
+            market_data = multicast_publisher_->stats();
+            queue_capacity = static_cast<std::uint64_t>(
+                MulticastPublisher::queue_capacity()
+            );
+        }
+
+        const auto system_now =
+            std::chrono::system_clock::now();
+
+        const auto timestamp_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                system_now.time_since_epoch()
+            ).count();
+
+        const auto uptime_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - performance_start_time_
+            ).count();
+
+        const double orders_per_second =
+            interval_seconds <= 0.0
+                ? 0.0
+                : static_cast<double>(
+                    current.new_order_requests -
+                    previous.new_order_requests
+                ) / interval_seconds;
+
+        const double executions_per_second =
+            interval_seconds <= 0.0
+                ? 0.0
+                : static_cast<double>(
+                    current.trades - previous.trades
+                ) / interval_seconds;
+
+        const PerformanceTelemetrySnapshot snapshot {
+            .timestamp_ms = static_cast<std::uint64_t>(timestamp_ms),
+            .uptime_ms = static_cast<std::uint64_t>(uptime_ms),
+            .counters = current,
+            .orders_per_second = orders_per_second,
+            .executions_per_second = executions_per_second,
+            .active_orders = active_orders,
+            .instruments = instrument_count,
+            .connected_clients = connected_clients,
+            .market_data = market_data,
+            .market_data_queue_capacity = queue_capacity
+        };
+
+        if (
+            performance_publisher_ != nullptr &&
+            !performance_publisher_->send(snapshot)
+        ) {
+            std::cerr
+                << "Failed to publish performance telemetry\n";
+        }
+
+        previous = current;
+        previous_time = now;
+    }
 }
 
 void ExchangeServer::run() {
@@ -363,6 +523,8 @@ void ExchangeServer::stop() {
     const bool was_running =
         running_.exchange(false);
 
+    performance_cv_.notify_all();
+
     if (was_running) {
         server_.stop();
 
@@ -372,6 +534,15 @@ void ExchangeServer::stop() {
         for (const int socket : sockets) {
             TcpServer::close_connection(socket);
         }
+    }
+
+    if (performance_thread_.joinable()) {
+        performance_thread_.join();
+    }
+
+    if (performance_publisher_ != nullptr) {
+        performance_publisher_->stop();
+        performance_publisher_.reset();
     }
 
     if (multicast_publisher_ != nullptr) {
@@ -644,6 +815,7 @@ void ExchangeServer::handle_new_order(
         RiskRejectReason::None;
 
     std::vector<ExecutionDelivery> deliveries;
+    std::uint64_t traded_quantity = 0;
     std::vector<protocol::Level3OrderExecuted> level3_executions;
     std::vector<protocol::Level3OrderDeleted> level3_deletions;
     std::optional<protocol::Level3AddOrder> level3_add;
@@ -725,10 +897,24 @@ void ExchangeServer::handle_new_order(
                     body
                 );
 
+                const auto matching_start =
+                    std::chrono::steady_clock::now();
+
                 engine_.process_order_into(
                     instrument.book,
                     order,
                     trade_buffer
+                );
+
+                const auto matching_end =
+                    std::chrono::steady_clock::now();
+
+                performance_metrics_.record_matching_latency(
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds
+                        >(matching_end - matching_start).count()
+                    )
                 );
 
                 accepted = true;
@@ -741,6 +927,10 @@ void ExchangeServer::handle_new_order(
                     deleted_order_ids;
 
                 for (const Trade& trade : trade_buffer) {
+                    traded_quantity += static_cast<std::uint64_t>(
+                        trade.quantity
+                    );
+
                     const OrderOwner buyer_owner =
                         find_order_owner(
                             instrument,
@@ -915,6 +1105,18 @@ void ExchangeServer::handle_new_order(
             << '\n';
     }
 
+    performance_metrics_.record_new_order(
+        accepted,
+        risk_reject_reason != RiskRejectReason::None
+    );
+
+    if (accepted && !deliveries.empty()) {
+        performance_metrics_.record_trades(
+            static_cast<std::uint64_t>(deliveries.size()),
+            traded_quantity
+        );
+    }
+
     send_order_response(
         client_socket,
         request->order_id,
@@ -1011,9 +1213,23 @@ void ExchangeServer::handle_cancel_order(
                     body
                 );
 
+                const auto matching_start =
+                    std::chrono::steady_clock::now();
+
                 cancelled = engine_.cancel_order(
                     instrument->book,
                     request->order_id
+                );
+
+                const auto matching_end =
+                    std::chrono::steady_clock::now();
+
+                performance_metrics_.record_matching_latency(
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds
+                        >(matching_end - matching_start).count()
+                    )
                 );
 
                 if (cancelled) {
@@ -1032,6 +1248,8 @@ void ExchangeServer::handle_cancel_order(
             }
         }
     }
+
+    performance_metrics_.record_cancel(cancelled);
 
     send_order_response(
         client_socket,
@@ -1109,6 +1327,7 @@ void ExchangeServer::handle_replace_order(
         RiskRejectReason::None;
 
     std::vector<ExecutionDelivery> deliveries;
+    std::uint64_t traded_quantity = 0;
     std::vector<protocol::Level3OrderExecuted> level3_executions;
     std::vector<protocol::Level3OrderDeleted> level3_deletions;
     std::optional<protocol::Level3AddOrder> level3_add;
@@ -1181,6 +1400,9 @@ void ExchangeServer::handle_replace_order(
                         request->order_id
                     );
 
+                    const auto matching_start =
+                        std::chrono::steady_clock::now();
+
                     replaced = engine_.replace_order_into(
                         instrument->book,
                         request->order_id,
@@ -1188,6 +1410,17 @@ void ExchangeServer::handle_replace_order(
                         new_quantity,
                         request->timestamp,
                         trade_buffer
+                    );
+
+                    const auto matching_end =
+                        std::chrono::steady_clock::now();
+
+                    performance_metrics_.record_matching_latency(
+                        static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<
+                                std::chrono::nanoseconds
+                            >(matching_end - matching_start).count()
+                        )
                     );
 
                     if (!replaced) {
@@ -1208,6 +1441,10 @@ void ExchangeServer::handle_replace_order(
                             deleted_order_ids;
 
                         for (const Trade& trade : trade_buffer) {
+                            traded_quantity += static_cast<std::uint64_t>(
+                                trade.quantity
+                            );
+
                             const OrderOwner buyer_owner =
                                 find_order_owner(
                                     *instrument,
@@ -1368,6 +1605,18 @@ void ExchangeServer::handle_replace_order(
             << ": "
             << to_string(risk_reject_reason)
             << '\n';
+    }
+
+    performance_metrics_.record_replace(
+        replaced,
+        risk_reject_reason != RiskRejectReason::None
+    );
+
+    if (replaced && !deliveries.empty()) {
+        performance_metrics_.record_trades(
+            static_cast<std::uint64_t>(deliveries.size()),
+            traded_quantity
+        );
     }
 
     send_order_response(
