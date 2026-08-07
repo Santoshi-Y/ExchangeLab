@@ -30,12 +30,31 @@ exchange::Order make_limit_order(
 
 }  // namespace
 
-TEST(MemoryPoolTest, StartsWithoutUpstreamAllocations) {
+TEST(MemoryPoolTest, ConstructionStatsAreInternallyConsistent) {
     exchange::MemoryPool pool;
     const auto stats = pool.stats();
 
-    EXPECT_EQ(stats.upstream_allocations, 0U);
-    EXPECT_EQ(stats.upstream_bytes_allocated, 0U);
+    // The C++ standard does not require unsynchronized_pool_resource
+    // to defer all upstream allocations until the first user request.
+    // libc++ currently does; libstdc++ may allocate bookkeeping storage
+    // during construction. Test portable invariants instead of a
+    // standard-library implementation detail.
+    EXPECT_NE(pool.resource(), nullptr);
+
+    EXPECT_EQ(
+        stats.upstream_allocations == 0U,
+        stats.upstream_bytes_allocated == 0U
+    );
+
+    EXPECT_LE(
+        stats.upstream_deallocations,
+        stats.upstream_allocations
+    );
+
+    EXPECT_LE(
+        stats.upstream_bytes_deallocated,
+        stats.upstream_bytes_allocated
+    );
 }
 
 TEST(MemoryPoolTest, ReusesFreedListNodes) {
