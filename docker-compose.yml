@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: exchangelab-backend
+    ports:
+      - "9000:9000" # Binary TCP order entry
+      - "8080:8080" # WebSocket market/performance feed
+      - "9878:9878" # FIX 4.4 gateway
+    volumes:
+      - exchange-data:/data
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    container_name: exchangelab-dashboard
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  exchange-data:

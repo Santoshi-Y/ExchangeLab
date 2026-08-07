@@ -146,7 +146,7 @@ function App() {
     const connect = () => {
       if (cancelled) return;
 
-      socket = new WebSocket("ws://127.0.0.1:8080");
+      socket = new WebSocket(`ws://${window.location.hostname}:8080`);
 
       socket.onopen = () => setConnected(true);
 
