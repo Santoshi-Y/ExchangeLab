@@ -196,6 +196,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/exchange_server_test.cpp
         tests/replay_test.cpp
         tests/startup_recovery_test.cpp
+        tests/multicast_publisher_test.cpp
     )
 
     target_link_libraries(

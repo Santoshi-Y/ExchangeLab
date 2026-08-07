@@ -1,7 +1,9 @@
 #include "exchange/multicast_publisher.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -30,7 +32,7 @@ MulticastPublisher::~MulticastPublisher() {
 }
 
 bool MulticastPublisher::start() {
-    if (socket_ >= 0) {
+    if (running_.load()) {
         return true;
     }
 
@@ -45,7 +47,9 @@ bool MulticastPublisher::start() {
     }
 
     const unsigned char ttl =
-        static_cast<unsigned char>(config_.ttl);
+        static_cast<unsigned char>(
+            config_.ttl
+        );
 
     if (
         ::setsockopt(
@@ -56,7 +60,8 @@ bool MulticastPublisher::start() {
             sizeof(ttl)
         ) != 0
     ) {
-        stop();
+        ::close(socket_);
+        socket_ = -1;
         return false;
     }
 
@@ -71,7 +76,8 @@ bool MulticastPublisher::start() {
             sizeof(loopback)
         ) != 0
     ) {
-        stop();
+        ::close(socket_);
+        socket_ = -1;
         return false;
     }
 
@@ -89,15 +95,62 @@ bool MulticastPublisher::start() {
             &destination->address.sin_addr
         ) != 1
     ) {
-        stop();
+        ::close(socket_);
+        socket_ = -1;
         return false;
     }
 
     destination_ = destination.release();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            queue_mutex_
+        );
+
+        read_index_ = 0;
+        write_index_ = 0;
+        queued_count_ = 0;
+    }
+
+    enqueued_.store(0);
+    sent_.store(0);
+    dropped_.store(0);
+    send_errors_.store(0);
+
+    running_.store(true);
+
+    try {
+        publisher_thread_ = std::thread(
+            &MulticastPublisher::publisher_loop,
+            this
+        );
+    } catch (...) {
+        running_.store(false);
+
+        delete destination_;
+        destination_ = nullptr;
+
+        ::close(socket_);
+        socket_ = -1;
+
+        return false;
+    }
+
     return true;
 }
 
 void MulticastPublisher::stop() noexcept {
+    const bool was_running =
+        running_.exchange(false);
+
+    if (was_running) {
+        queue_cv_.notify_all();
+    }
+
+    if (publisher_thread_.joinable()) {
+        publisher_thread_.join();
+    }
+
     if (socket_ >= 0) {
         ::close(socket_);
         socket_ = -1;
@@ -105,11 +158,177 @@ void MulticastPublisher::stop() noexcept {
 
     delete destination_;
     destination_ = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            queue_mutex_
+        );
+
+        read_index_ = 0;
+        write_index_ = 0;
+        queued_count_ = 0;
+    }
 }
 
 bool MulticastPublisher::send(
     std::span<const std::byte> datagram
-) const noexcept {
+) noexcept {
+    if (
+        !running_.load() ||
+        datagram.empty() ||
+        datagram.size() >
+            kMaximumDatagramSize
+    ) {
+        dropped_.fetch_add(
+            1,
+            std::memory_order_relaxed
+        );
+
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            queue_mutex_
+        );
+
+        if (
+            !running_.load() ||
+            queued_count_ == kQueueCapacity
+        ) {
+            dropped_.fetch_add(
+                1,
+                std::memory_order_relaxed
+            );
+
+            return false;
+        }
+
+        Slot& slot = queue_[write_index_];
+
+        std::memcpy(
+            slot.bytes.data(),
+            datagram.data(),
+            datagram.size()
+        );
+
+        slot.size = datagram.size();
+
+        write_index_ =
+            (write_index_ + 1U) %
+            kQueueCapacity;
+
+        ++queued_count_;
+    }
+
+    enqueued_.fetch_add(
+        1,
+        std::memory_order_relaxed
+    );
+
+    queue_cv_.notify_one();
+
+    return true;
+}
+
+bool MulticastPublisher::is_open() const noexcept {
+    return running_.load() &&
+        socket_ >= 0 &&
+        destination_ != nullptr;
+}
+
+const MulticastConfig&
+MulticastPublisher::config() const noexcept {
+    return config_;
+}
+
+MulticastPublisherStats
+MulticastPublisher::stats() const noexcept {
+    return {
+        .enqueued = enqueued_.load(
+            std::memory_order_relaxed
+        ),
+        .sent = sent_.load(
+            std::memory_order_relaxed
+        ),
+        .dropped = dropped_.load(
+            std::memory_order_relaxed
+        ),
+        .send_errors = send_errors_.load(
+            std::memory_order_relaxed
+        )
+    };
+}
+
+void MulticastPublisher::publisher_loop() noexcept {
+    while (true) {
+        Slot local_slot;
+
+        {
+            std::unique_lock<std::mutex> lock(
+                queue_mutex_
+            );
+
+            queue_cv_.wait(
+                lock,
+                [this]() {
+                    return
+                        queued_count_ > 0 ||
+                        !running_.load();
+                }
+            );
+
+            if (
+                queued_count_ == 0 &&
+                !running_.load()
+            ) {
+                break;
+            }
+
+            Slot& queued_slot =
+                queue_[read_index_];
+
+            local_slot.size =
+                queued_slot.size;
+
+            std::copy_n(
+                queued_slot.bytes.begin(),
+                local_slot.size,
+                local_slot.bytes.begin()
+            );
+
+            queued_slot.size = 0;
+
+            read_index_ =
+                (read_index_ + 1U) %
+                kQueueCapacity;
+
+            --queued_count_;
+        }
+
+        const std::span<const std::byte>
+            datagram {
+                local_slot.bytes.data(),
+                local_slot.size
+            };
+
+        if (send_datagram(datagram)) {
+            sent_.fetch_add(
+                1,
+                std::memory_order_relaxed
+            );
+        } else {
+            send_errors_.fetch_add(
+                1,
+                std::memory_order_relaxed
+            );
+        }
+    }
+}
+
+bool MulticastPublisher::send_datagram(
+    std::span<const std::byte> datagram
+) noexcept {
     if (
         socket_ < 0 ||
         destination_ == nullptr ||
@@ -130,16 +349,9 @@ bool MulticastPublisher::send(
     );
 
     return sent ==
-        static_cast<ssize_t>(datagram.size());
-}
-
-bool MulticastPublisher::is_open() const noexcept {
-    return socket_ >= 0;
-}
-
-const MulticastConfig&
-MulticastPublisher::config() const noexcept {
-    return config_;
+        static_cast<ssize_t>(
+            datagram.size()
+        );
 }
 
 }  // namespace exchange
