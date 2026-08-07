@@ -102,6 +102,19 @@ target_link_libraries(
         exchange_lab_lib
 )
 
+add_executable(
+    exchange_websocket_gateway
+    tools/exchange_websocket_gateway.cpp
+    src/websocket_gateway.cpp
+)
+
+target_link_libraries(
+    exchange_websocket_gateway
+    PRIVATE
+        exchange_lab_lib
+        Threads::Threads
+)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
         exchange_lab
@@ -134,6 +147,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             -Wextra
             -Wpedantic
     )
+
+    target_compile_options(
+        exchange_websocket_gateway
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
 elseif(MSVC)
     target_compile_options(
         exchange_lab
@@ -155,6 +176,12 @@ elseif(MSVC)
 
     target_compile_options(
         exchange_market_data_listener
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_websocket_gateway
         PRIVATE
             /W4
     )
@@ -197,6 +224,8 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/replay_test.cpp
         tests/startup_recovery_test.cpp
         tests/multicast_publisher_test.cpp
+        tests/websocket_gateway_test.cpp
+        src/websocket_gateway.cpp
     )
 
     target_link_libraries(

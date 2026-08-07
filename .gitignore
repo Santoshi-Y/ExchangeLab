@@ -22,3 +22,8 @@ build-error.txt
 
 exchange.log
 *.journal
+
+# React / Vite dashboard
+dashboard/node_modules/
+dashboard/dist/
+dashboard/*.tsbuildinfo
