@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "exchange/exchange_server.hpp"
+#include "exchange/protocol.hpp"
 
 int main() {
     constexpr std::uint16_t port = 9000;
@@ -52,6 +53,9 @@ int main() {
             << "  Unsupported records: "
             << recovery.unsupported_messages
             << '\n'
+            << "  Instruments: "
+            << recovery.instruments
+            << '\n'
             << "  Remaining orders: "
             << recovery.remaining_orders
             << '\n';
@@ -61,8 +65,16 @@ int main() {
         << "ExchangeLab listening on port "
         << port
         << '\n'
+        << "Protocol version: "
+        << exchange::protocol::protocol_version
+        << '\n'
         << "Journal: "
         << journal_path
+        << '\n'
+        << "Market data multicast: "
+        << multicast.group
+        << ':'
+        << multicast.port
         << '\n';
 
     server.run();

@@ -11,6 +11,7 @@ type Order = {
 
 type BookMessage = {
   type: "book";
+  symbol: string;
   sequence: number;
   hasBid: boolean;
   bestBid: number;
@@ -22,6 +23,7 @@ type BookMessage = {
 
 type AddMessage = {
   type: "add";
+  symbol: string;
   sequence: number;
   orderId: number;
   timestamp: number;
@@ -32,6 +34,7 @@ type AddMessage = {
 
 type ExecuteMessage = {
   type: "execute";
+  symbol: string;
   sequence: number;
   buyOrderId: number;
   sellOrderId: number;
@@ -41,6 +44,7 @@ type ExecuteMessage = {
 
 type DeleteMessage = {
   type: "delete";
+  symbol: string;
   sequence: number;
   orderId: number;
 };
@@ -51,16 +55,37 @@ type MarketMessage =
   | ExecuteMessage
   | DeleteMessage;
 
+type TopOfBook = {
+  price: number;
+  quantity: number;
+};
+
+type InstrumentView = {
+  bestBid: TopOfBook | null;
+  bestAsk: TopOfBook | null;
+  orders: Map<number, Order>;
+};
+
 type TapeItem = {
   sequence: number;
+  symbol: string;
   text: string;
 };
 
+function emptyInstrument(): InstrumentView {
+  return {
+    bestBid: null,
+    bestAsk: null,
+    orders: new Map(),
+  };
+}
+
 function App() {
   const [connected, setConnected] = useState(false);
-  const [bestBid, setBestBid] = useState<{ price: number; quantity: number } | null>(null);
-  const [bestAsk, setBestAsk] = useState<{ price: number; quantity: number } | null>(null);
-  const [orders, setOrders] = useState<Map<number, Order>>(new Map());
+  const [instruments, setInstruments] = useState<Map<string, InstrumentView>>(
+    new Map()
+  );
+  const [selectedSymbol, setSelectedSymbol] = useState("AAPL");
   const [tape, setTape] = useState<TapeItem[]>([]);
   const [lastSequence, setLastSequence] = useState(0);
   const reconnectTimer = useRef<number | null>(null);
@@ -78,6 +103,7 @@ function App() {
 
       socket.onclose = () => {
         setConnected(false);
+
         if (!cancelled) {
           reconnectTimer.current = window.setTimeout(connect, 1000);
         }
@@ -91,90 +117,81 @@ function App() {
         const message = JSON.parse(event.data) as MarketMessage;
         setLastSequence(message.sequence);
 
-        if (message.type === "book") {
-          setBestBid(
-            message.hasBid
-              ? { price: message.bestBid, quantity: message.bidQuantity }
-              : null
-          );
-          setBestAsk(
-            message.hasAsk
-              ? { price: message.bestAsk, quantity: message.askQuantity }
-              : null
-          );
-          return;
-        }
+        setInstruments((previous) => {
+          const next = new Map(previous);
+          const existing = next.get(message.symbol) ?? emptyInstrument();
+          const instrument: InstrumentView = {
+            bestBid: existing.bestBid,
+            bestAsk: existing.bestAsk,
+            orders: new Map(existing.orders),
+          };
 
-        if (message.type === "add") {
-          setOrders((previous) => {
-            const next = new Map(previous);
-            next.set(message.orderId, {
+          if (message.type === "book") {
+            instrument.bestBid = message.hasBid
+              ? {
+                  price: message.bestBid,
+                  quantity: message.bidQuantity,
+                }
+              : null;
+
+            instrument.bestAsk = message.hasAsk
+              ? {
+                  price: message.bestAsk,
+                  quantity: message.askQuantity,
+                }
+              : null;
+          } else if (message.type === "add") {
+            instrument.orders.set(message.orderId, {
               orderId: message.orderId,
               price: message.price,
               quantity: message.quantity,
               side: message.side,
             });
-            return next;
-          });
-
-          setTape((previous) =>
-            [
-              {
-                sequence: message.sequence,
-                text: `ADD ${message.side} #${message.orderId} ${message.quantity} @ ${message.price}`,
-              },
-              ...previous,
-            ].slice(0, 40)
-          );
-          return;
-        }
-
-        if (message.type === "execute") {
-          setOrders((previous) => {
-            const next = new Map(previous);
-
+          } else if (message.type === "execute") {
             for (const id of [message.buyOrderId, message.sellOrderId]) {
-              const order = next.get(id);
+              const order = instrument.orders.get(id);
+
               if (!order) continue;
 
               const remaining = order.quantity - message.quantity;
+
               if (remaining > 0) {
-                next.set(id, { ...order, quantity: remaining });
+                instrument.orders.set(id, {
+                  ...order,
+                  quantity: remaining,
+                });
               }
             }
+          } else {
+            instrument.orders.delete(message.orderId);
+          }
 
-            return next;
-          });
+          next.set(message.symbol, instrument);
+          return next;
+        });
 
-          setTape((previous) =>
-            [
-              {
-                sequence: message.sequence,
-                text: `TRADE ${message.quantity} @ ${message.price}  buy #${message.buyOrderId} / sell #${message.sellOrderId}`,
-              },
-              ...previous,
-            ].slice(0, 40)
-          );
-          return;
+        if (message.type === "book") return;
+
+        let text = "";
+
+        if (message.type === "add") {
+          text = `ADD ${message.side} #${message.orderId} ${message.quantity} @ ${message.price}`;
+        } else if (message.type === "execute") {
+          text = `TRADE ${message.quantity} @ ${message.price}  buy #${message.buyOrderId} / sell #${message.sellOrderId}`;
+        } else {
+          text = `DELETE #${message.orderId}`;
         }
 
-        if (message.type === "delete") {
-          setOrders((previous) => {
-            const next = new Map(previous);
-            next.delete(message.orderId);
-            return next;
-          });
-
-          setTape((previous) =>
-            [
-              {
-                sequence: message.sequence,
-                text: `DELETE #${message.orderId}`,
-              },
-              ...previous,
-            ].slice(0, 40)
-          );
-        }
+        setTape((previous) =>
+          [
+            {
+              sequence: message.sequence,
+              symbol: message.symbol,
+              text,
+            },
+            ...previous,
+          ].slice(0, 60)
+        );
       };
     };
 
@@ -182,41 +199,59 @@ function App() {
 
     return () => {
       cancelled = true;
+
       if (reconnectTimer.current !== null) {
         window.clearTimeout(reconnectTimer.current);
       }
+
       socket?.close();
     };
   }, []);
 
+  const symbols = useMemo(
+    () => [...instruments.keys()].sort(),
+    [instruments]
+  );
+
+  useEffect(() => {
+    if (
+      symbols.length > 0 &&
+      !instruments.has(selectedSymbol)
+    ) {
+      setSelectedSymbol(symbols[0]);
+    }
+  }, [instruments, selectedSymbol, symbols]);
+
+  const selected = instruments.get(selectedSymbol) ?? emptyInstrument();
+
   const bids = useMemo(
     () =>
-      [...orders.values()]
+      [...selected.orders.values()]
         .filter((order) => order.side === "BUY")
         .sort((a, b) => b.price - a.price || a.orderId - b.orderId)
         .slice(0, 10),
-    [orders]
+    [selected]
   );
 
   const asks = useMemo(
     () =>
-      [...orders.values()]
+      [...selected.orders.values()]
         .filter((order) => order.side === "SELL")
         .sort((a, b) => a.price - b.price || a.orderId - b.orderId)
         .slice(0, 10),
-    [orders]
+    [selected]
   );
 
   const midpoint =
-    bestBid && bestAsk
-      ? ((bestBid.price + bestAsk.price) / 2).toFixed(2)
+    selected.bestBid && selected.bestAsk
+      ? ((selected.bestBid.price + selected.bestAsk.price) / 2).toFixed(2)
       : "—";
 
   return (
     <main className="shell">
       <header>
         <div>
-          <p className="eyebrow">LOW-LATENCY EXCHANGE SIMULATOR</p>
+          <p className="eyebrow">LOW-LATENCY MULTI-SYMBOL EXCHANGE SIMULATOR</p>
           <h1>ExchangeLab</h1>
         </div>
 
@@ -229,33 +264,55 @@ function App() {
         </div>
       </header>
 
+      <section className="symbol-bar">
+        <span>Instrument</span>
+        <div className="symbol-tabs">
+          {symbols.length === 0 ? (
+            <button className="symbol-tab active" type="button">
+              Waiting for feed…
+            </button>
+          ) : (
+            symbols.map((symbol) => (
+              <button
+                className={`symbol-tab ${symbol === selectedSymbol ? "active" : ""}`}
+                key={symbol}
+                onClick={() => setSelectedSymbol(symbol)}
+                type="button"
+              >
+                {symbol}
+              </button>
+            ))
+          )}
+        </div>
+      </section>
+
       <section className="metrics">
         <Metric
-          label="Best Bid"
-          value={bestBid ? `${bestBid.price}` : "—"}
-          sub={bestBid ? `${bestBid.quantity} units` : "No bid"}
+          label={`${selectedSymbol} Best Bid`}
+          value={selected.bestBid ? `${selected.bestBid.price}` : "—"}
+          sub={selected.bestBid ? `${selected.bestBid.quantity} units` : "No bid"}
         />
         <Metric
           label="Midpoint"
           value={midpoint}
-          sub="Top of book"
+          sub={selectedSymbol}
         />
         <Metric
-          label="Best Ask"
-          value={bestAsk ? `${bestAsk.price}` : "—"}
-          sub={bestAsk ? `${bestAsk.quantity} units` : "No ask"}
+          label={`${selectedSymbol} Best Ask`}
+          value={selected.bestAsk ? `${selected.bestAsk.price}` : "—"}
+          sub={selected.bestAsk ? `${selected.bestAsk.quantity} units` : "No ask"}
         />
         <Metric
           label="Visible L3 Orders"
-          value={`${orders.size}`}
-          sub="Reconstructed from feed"
+          value={`${selected.orders.size}`}
+          sub={`${symbols.length} instrument${symbols.length === 1 ? "" : "s"} observed`}
         />
       </section>
 
       <section className="grid">
         <div className="panel order-book">
           <div className="panel-title">
-            <h2>Level 3 Order Book</h2>
+            <h2>{selectedSymbol} Level 3 Order Book</h2>
             <span>price-time feed</span>
           </div>
 
@@ -267,8 +324,8 @@ function App() {
 
         <div className="panel tape">
           <div className="panel-title">
-            <h2>Event Tape</h2>
-            <span>latest 40 events</span>
+            <h2>Cross-Symbol Event Tape</h2>
+            <span>latest 60 events</span>
           </div>
 
           <div className="tape-list">
@@ -276,8 +333,9 @@ function App() {
               <div className="empty">Waiting for market data…</div>
             ) : (
               tape.map((item) => (
-                <div className="tape-row" key={`${item.sequence}-${item.text}`}>
+                <div className="tape-row" key={`${item.sequence}-${item.symbol}-${item.text}`}>
                   <span>{item.sequence}</span>
+                  <strong>{item.symbol}</strong>
                   <code>{item.text}</code>
                 </div>
               ))

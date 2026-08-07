@@ -36,6 +36,10 @@ void print_message(
 
             std::cout
                 << "SEQ " << header.sequence_number
+                << " "
+                << exchange::protocol::symbol_to_string(
+                    update->symbol
+                )
                 << " BOOK ";
 
             if (update->has_bid != 0) {
@@ -70,6 +74,10 @@ void print_message(
 
             std::cout
                 << "SEQ " << header.sequence_number
+                << " "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
                 << " L3 ADD id=" << event->order_id
                 << ' '
                 << (event->side == exchange::protocol::Side::Buy
@@ -92,6 +100,10 @@ void print_message(
 
             std::cout
                 << "SEQ " << header.sequence_number
+                << " "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
                 << " L3 EXEC buy=" << event->buy_order_id
                 << " sell=" << event->sell_order_id
                 << " price=" << event->price
@@ -111,6 +123,10 @@ void print_message(
 
             std::cout
                 << "SEQ " << header.sequence_number
+                << " "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
                 << " L3 DELETE id=" << event->order_id
                 << '\n';
             break;

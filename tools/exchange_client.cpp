@@ -213,7 +213,12 @@ void print_message(const ReceivedMessage& message) {
                 return;
             }
 
-            std::cout << "BOOK ";
+            std::cout
+                << "BOOK "
+                << exchange::protocol::symbol_to_string(
+                    update->symbol
+                )
+                << ' ';
 
             if (update->has_bid != 0) {
                 std::cout
@@ -248,7 +253,11 @@ void print_message(const ReceivedMessage& message) {
             }
 
             std::cout
-                << "L3 ADD id=" << event->order_id
+                << "L3 ADD "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
+                << " id=" << event->order_id
                 << ' '
                 << (
                     event->side ==
@@ -276,7 +285,11 @@ void print_message(const ReceivedMessage& message) {
             }
 
             std::cout
-                << "L3 EXEC buy=" << event->buy_order_id
+                << "L3 EXEC "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
+                << " buy=" << event->buy_order_id
                 << " sell=" << event->sell_order_id
                 << " price=" << event->price
                 << " quantity=" << event->quantity
@@ -298,7 +311,11 @@ void print_message(const ReceivedMessage& message) {
             }
 
             std::cout
-                << "L3 DELETE id="
+                << "L3 DELETE "
+                << exchange::protocol::symbol_to_string(
+                    event->symbol
+                )
+                << " id="
                 << event->order_id
                 << '\n';
             break;
@@ -347,7 +364,13 @@ int main() {
         return 1;
     }
 
-    const exchange::protocol::NewOrderRequest new_order {
+    const auto aapl =
+        exchange::protocol::make_symbol("AAPL");
+
+    const auto msft =
+        exchange::protocol::make_symbol("MSFT");
+
+    const exchange::protocol::NewOrderRequest aapl_order {
         .order_id = 1,
         .timestamp = 1,
         .price = 105,
@@ -356,28 +379,57 @@ int main() {
         .order_type =
             exchange::protocol::OrderType::Limit,
         .time_in_force =
-            exchange::protocol::TimeInForce::GoodTillCancel
+            exchange::protocol::TimeInForce::GoodTillCancel,
+        .symbol = aapl
     };
 
     if (
         !send_request(
             client_socket,
             exchange::protocol::MessageType::NewOrder,
-            exchange::protocol::encode_new_order(new_order),
+            exchange::protocol::encode_new_order(aapl_order),
             1
         ) ||
         !receive_and_print(client_socket, 3)
     ) {
-        std::cerr << "New-order lifecycle failed\n";
+        std::cerr << "AAPL new-order lifecycle failed\n";
+        ::close(client_socket);
+        return 1;
+    }
+
+    const exchange::protocol::NewOrderRequest msft_order {
+        .order_id = 1,
+        .timestamp = 2,
+        .price = 410,
+        .quantity = 25,
+        .side = exchange::protocol::Side::Buy,
+        .order_type =
+            exchange::protocol::OrderType::Limit,
+        .time_in_force =
+            exchange::protocol::TimeInForce::GoodTillCancel,
+        .symbol = msft
+    };
+
+    if (
+        !send_request(
+            client_socket,
+            exchange::protocol::MessageType::NewOrder,
+            exchange::protocol::encode_new_order(msft_order),
+            2
+        ) ||
+        !receive_and_print(client_socket, 3)
+    ) {
+        std::cerr << "MSFT new-order lifecycle failed\n";
         ::close(client_socket);
         return 1;
     }
 
     const exchange::protocol::ReplaceOrderRequest replace {
         .order_id = 1,
-        .timestamp = 2,
+        .timestamp = 3,
         .new_price = 106,
-        .new_quantity = 12
+        .new_quantity = 12,
+        .symbol = aapl
     };
 
     if (
@@ -385,18 +437,19 @@ int main() {
             client_socket,
             exchange::protocol::MessageType::ReplaceOrder,
             exchange::protocol::encode_replace_order(replace),
-            2
+            3
         ) ||
         !receive_and_print(client_socket, 4)
     ) {
-        std::cerr << "Replace lifecycle failed\n";
+        std::cerr << "AAPL replace lifecycle failed\n";
         ::close(client_socket);
         return 1;
     }
 
     const exchange::protocol::CancelOrderRequest cancel {
         .order_id = 1,
-        .timestamp = 3
+        .timestamp = 4,
+        .symbol = aapl
     };
 
     if (
@@ -404,14 +457,19 @@ int main() {
             client_socket,
             exchange::protocol::MessageType::CancelOrder,
             exchange::protocol::encode_cancel_order(cancel),
-            3
+            4
         ) ||
         !receive_and_print(client_socket, 3)
     ) {
-        std::cerr << "Cancel lifecycle failed\n";
+        std::cerr << "AAPL cancel lifecycle failed\n";
         ::close(client_socket);
         return 1;
     }
+
+    std::cout
+        << "Multi-symbol demo complete: "
+        << "AAPL lifecycle finished; "
+        << "MSFT order remains resting.\n";
 
     ::shutdown(client_socket, SHUT_RDWR);
     ::close(client_socket);

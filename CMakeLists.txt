@@ -225,6 +225,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/startup_recovery_test.cpp
         tests/multicast_publisher_test.cpp
         tests/websocket_gateway_test.cpp
+        tests/multi_symbol_test.cpp
         src/websocket_gateway.cpp
     )
 

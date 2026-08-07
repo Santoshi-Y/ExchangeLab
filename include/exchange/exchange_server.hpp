@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +34,7 @@ struct RecoveryState {
     std::uint64_t unsupported_messages {0};
 
     std::size_t remaining_orders {0};
+    std::size_t instruments {0};
 };
 
 class ExchangeServer {
@@ -60,13 +62,20 @@ public:
     recovery_state() const noexcept;
 
 private:
+    struct InstrumentState {
+        OrderBook book;
+        std::unordered_map<OrderId, int> order_owners;
+    };
+
     struct ExecutionDelivery {
         Trade trade;
+        protocol::Symbol symbol;
         int buyer_socket;
         int seller_socket;
     };
 
     struct BookSnapshot {
+        protocol::Symbol symbol;
         bool has_bid;
         Price best_bid;
         Quantity bid_quantity;
@@ -122,6 +131,7 @@ private:
 
     void send_trade_execution(
         int client_socket,
+        const protocol::Symbol& symbol,
         const Trade& trade
     );
 
@@ -129,7 +139,9 @@ private:
         const std::vector<ExecutionDelivery>& deliveries
     );
 
-    void broadcast_book_update(const BookSnapshot& snapshot);
+    void broadcast_book_update(
+        const BookSnapshot& snapshot
+    );
 
     void broadcast_level3_add_order(
         const protocol::Level3AddOrder& event
@@ -143,30 +155,44 @@ private:
         const protocol::Level3OrderDeleted& event
     );
 
-    [[nodiscard]] BookSnapshot capture_book_snapshot() const;
+    [[nodiscard]] BookSnapshot capture_book_snapshot(
+        const protocol::Symbol& symbol,
+        const OrderBook& book
+    ) const;
 
     [[nodiscard]] int find_order_owner(
+        const InstrumentState& instrument,
         OrderId order_id,
         OrderId incoming_order_id,
         int incoming_socket
     ) const;
 
     void remove_filled_order_owners(
+        InstrumentState& instrument,
         const MatchingEngine::BufferedTrades& trades,
         OrderId incoming_order_id
+    );
+
+    [[nodiscard]] InstrumentState& instrument_for(
+        const std::string& symbol
+    );
+
+    [[nodiscard]] InstrumentState* find_instrument(
+        const std::string& symbol
     );
 
     void register_client(int client_socket);
     void unregister_client(int client_socket);
 
-    [[nodiscard]] std::vector<int> client_socket_snapshot();
+    [[nodiscard]] std::vector<int>
+    client_socket_snapshot();
 
     TcpServer server_;
-    OrderBook book_;
     MatchingEngine engine_;
 
     std::mutex engine_mutex_;
-    std::unordered_map<OrderId, int> order_owners_;
+    std::unordered_map<std::string, InstrumentState> instruments_;
+
     std::mutex send_mutex_;
     std::mutex clients_mutex_;
     std::vector<int> client_sockets_;

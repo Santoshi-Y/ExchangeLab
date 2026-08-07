@@ -1,11 +1,13 @@
 #include "exchange/replay.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "exchange/order.hpp"
@@ -21,6 +23,9 @@ constexpr std::size_t record_length_size =
 
 constexpr std::uint32_t maximum_record_size =
     1024U * 1024U;
+
+constexpr std::string_view default_symbol_text =
+    "TEST";
 
 std::uint32_t decode_record_length(
     const std::array<std::byte, record_length_size>& bytes
@@ -176,6 +181,16 @@ bool ExchangeReplayer::replay(
                         break;
                     }
 
+                    const std::string symbol =
+                        protocol::symbol_to_string(
+                            request->symbol
+                        );
+
+                    if (symbol.empty()) {
+                        ++summary_.rejected_messages;
+                        break;
+                    }
+
                     const Quantity quantity =
                         static_cast<Quantity>(request->quantity);
 
@@ -196,8 +211,10 @@ bool ExchangeReplayer::replay(
                         .timestamp = request->timestamp
                     };
 
+                    OrderBook& book = book_for(symbol);
+
                     engine_.process_order_into(
-                        *book_,
+                        book,
                         order,
                         trade_buffer_
                     );
@@ -214,10 +231,24 @@ bool ExchangeReplayer::replay(
                     const auto request =
                         protocol::decode_cancel_order(body);
 
+                    if (!request.has_value()) {
+                        ++summary_.rejected_messages;
+                        break;
+                    }
+
+                    const std::string symbol =
+                        protocol::symbol_to_string(
+                            request->symbol
+                        );
+
+                    const auto book_iterator =
+                        books_.find(symbol);
+
                     if (
-                        !request.has_value() ||
+                        symbol.empty() ||
+                        book_iterator == books_.end() ||
                         !engine_.cancel_order(
-                            *book_,
+                            *book_iterator->second,
                             request->order_id
                         )
                     ) {
@@ -245,9 +276,25 @@ bool ExchangeReplayer::replay(
                         break;
                     }
 
+                    const std::string symbol =
+                        protocol::symbol_to_string(
+                            request->symbol
+                        );
+
+                    const auto book_iterator =
+                        books_.find(symbol);
+
+                    if (
+                        symbol.empty() ||
+                        book_iterator == books_.end()
+                    ) {
+                        ++summary_.rejected_messages;
+                        break;
+                    }
+
                     const ReplaceResult result =
                         engine_.replace_order(
-                            *book_,
+                            *book_iterator->second,
                             request->order_id,
                             request->new_price,
                             static_cast<Quantity>(
@@ -277,6 +324,9 @@ bool ExchangeReplayer::replay(
         }
     }
 
+    summary_.symbols =
+        static_cast<std::uint64_t>(books_.size());
+
     return true;
 }
 
@@ -287,22 +337,90 @@ ExchangeReplayer::summary() const noexcept {
 
 const OrderBook&
 ExchangeReplayer::order_book() const noexcept {
-    return *book_;
+    return order_book(default_symbol_text);
+}
+
+const OrderBook& ExchangeReplayer::order_book(
+    std::string_view symbol
+) const noexcept {
+    const auto iterator =
+        books_.find(std::string(symbol));
+
+    if (iterator != books_.end()) {
+        return *iterator->second;
+    }
+
+    static const OrderBook empty_book;
+    return empty_book;
+}
+
+bool ExchangeReplayer::has_symbol(
+    std::string_view symbol
+) const noexcept {
+    return books_.contains(std::string(symbol));
+}
+
+std::vector<std::string>
+ExchangeReplayer::symbols() const {
+    std::vector<std::string> result;
+    result.reserve(books_.size());
+
+    for (const auto& [symbol, book] : books_) {
+        static_cast<void>(book);
+        result.push_back(symbol);
+    }
+
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 std::unique_ptr<OrderBook>
 ExchangeReplayer::release_order_book() {
-    std::unique_ptr<OrderBook> recovered =
-        std::move(book_);
+    const auto iterator =
+        books_.find(std::string(default_symbol_text));
 
-    book_ = std::make_unique<OrderBook>();
+    if (iterator == books_.end()) {
+        return std::make_unique<OrderBook>();
+    }
+
+    std::unique_ptr<OrderBook> recovered =
+        std::move(iterator->second);
+
+    books_.erase(iterator);
+    summary_.symbols =
+        static_cast<std::uint64_t>(books_.size());
+
+    return recovered;
+}
+
+ExchangeReplayer::RecoveredBooks
+ExchangeReplayer::release_order_books() {
+    RecoveredBooks recovered =
+        std::move(books_);
+
+    books_.clear();
+    summary_.symbols = 0;
     trade_buffer_.clear();
 
     return recovered;
 }
 
+OrderBook& ExchangeReplayer::book_for(
+    const std::string& symbol
+) {
+    auto [iterator, inserted] =
+        books_.try_emplace(symbol, nullptr);
+
+    if (inserted || iterator->second == nullptr) {
+        iterator->second =
+            std::make_unique<OrderBook>();
+    }
+
+    return *iterator->second;
+}
+
 void ExchangeReplayer::reset() {
-    book_ = std::make_unique<OrderBook>();
+    books_.clear();
     trade_buffer_.clear();
     summary_ = ReplaySummary {};
 }

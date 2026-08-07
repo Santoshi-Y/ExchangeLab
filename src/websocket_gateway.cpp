@@ -939,6 +939,9 @@ std::string WebSocketGateway::market_data_to_json(
 
             json
                 << "{\"type\":\"book\","
+                << "\"symbol\":\""
+                << protocol::symbol_to_string(update->symbol)
+                << "\","
                 << "\"sequence\":"
                 << update->sequence_number
                 << ",\"hasBid\":"
@@ -968,6 +971,9 @@ std::string WebSocketGateway::market_data_to_json(
 
             json
                 << "{\"type\":\"add\","
+                << "\"symbol\":\""
+                << protocol::symbol_to_string(event->symbol)
+                << "\","
                 << "\"sequence\":"
                 << event->sequence_number
                 << ",\"orderId\":"
@@ -1003,6 +1009,9 @@ std::string WebSocketGateway::market_data_to_json(
 
             json
                 << "{\"type\":\"execute\","
+                << "\"symbol\":\""
+                << protocol::symbol_to_string(event->symbol)
+                << "\","
                 << "\"sequence\":"
                 << event->sequence_number
                 << ",\"buyOrderId\":"
@@ -1031,6 +1040,9 @@ std::string WebSocketGateway::market_data_to_json(
 
             json
                 << "{\"type\":\"delete\","
+                << "\"symbol\":\""
+                << protocol::symbol_to_string(event->symbol)
+                << "\","
                 << "\"sequence\":"
                 << event->sequence_number
                 << ",\"orderId\":"

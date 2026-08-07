@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <type_traits>
 
 namespace exchange::protocol {
 
 constexpr std::uint32_t protocol_magic = 0x45584C42;  // "EXLB"
-constexpr std::uint16_t protocol_version = 2;
+constexpr std::uint16_t protocol_version = 3;
 
 enum class MessageType : std::uint16_t {
     NewOrder = 1,
@@ -45,6 +47,93 @@ enum class TimeInForce : std::uint8_t {
     FillOrKill = 2
 };
 
+constexpr std::size_t symbol_size = 8;
+using Symbol = std::array<char, symbol_size>;
+
+inline constexpr Symbol default_symbol {
+    'T', 'E', 'S', 'T', '\0', '\0', '\0', '\0'
+};
+
+[[nodiscard]] inline bool is_valid_symbol_character(
+    char character
+) noexcept {
+    return
+        (character >= 'A' && character <= 'Z') ||
+        (character >= '0' && character <= '9') ||
+        character == '.' ||
+        character == '-';
+}
+
+[[nodiscard]] inline bool is_valid_symbol(
+    const Symbol& symbol
+) noexcept {
+    bool saw_character = false;
+    bool saw_terminator = false;
+
+    for (const char character : symbol) {
+        if (character == '\0') {
+            saw_terminator = true;
+            continue;
+        }
+
+        if (saw_terminator) {
+            return false;
+        }
+
+        if (!is_valid_symbol_character(character)) {
+            return false;
+        }
+
+        saw_character = true;
+    }
+
+    return saw_character;
+}
+
+[[nodiscard]] inline Symbol make_symbol(
+    std::string_view text
+) noexcept {
+    Symbol symbol {};
+
+    if (text.empty() || text.size() > symbol_size) {
+        return symbol;
+    }
+
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const char character = text[index];
+
+        if (!is_valid_symbol_character(character)) {
+            return Symbol {};
+        }
+
+        symbol[index] = character;
+    }
+
+    return symbol;
+}
+
+[[nodiscard]] inline std::string symbol_to_string(
+    const Symbol& symbol
+) {
+    if (!is_valid_symbol(symbol)) {
+        return {};
+    }
+
+    std::size_t length = 0;
+
+    while (
+        length < symbol.size() &&
+        symbol[length] != '\0'
+    ) {
+        ++length;
+    }
+
+    return std::string(
+        symbol.data(),
+        length
+    );
+}
+
 struct MessageHeader {
     std::uint32_t magic {};
     std::uint16_t version {};
@@ -61,11 +150,13 @@ struct NewOrderRequest {
     Side side {};
     OrderType order_type {};
     TimeInForce time_in_force {};
+    Symbol symbol {default_symbol};
 };
 
 struct CancelOrderRequest {
     std::uint64_t order_id {};
     std::uint64_t timestamp {};
+    Symbol symbol {default_symbol};
 };
 
 struct ReplaceOrderRequest {
@@ -73,6 +164,7 @@ struct ReplaceOrderRequest {
     std::uint64_t timestamp {};
     std::int64_t new_price {};
     std::uint64_t new_quantity {};
+    Symbol symbol {default_symbol};
 };
 
 struct OrderResponse {
@@ -87,6 +179,7 @@ struct TradeExecution {
     std::int64_t price {};
     std::uint64_t quantity {};
     std::uint64_t sequence_number {};
+    Symbol symbol {default_symbol};
 };
 
 struct BookUpdate {
@@ -99,6 +192,7 @@ struct BookUpdate {
     std::uint64_t ask_quantity {};
 
     std::uint64_t sequence_number {};
+    Symbol symbol {default_symbol};
 };
 
 struct Level3AddOrder {
@@ -108,6 +202,7 @@ struct Level3AddOrder {
     std::uint64_t quantity {};
     Side side {};
     std::uint64_t sequence_number {};
+    Symbol symbol {default_symbol};
 };
 
 struct Level3OrderExecuted {
@@ -116,11 +211,13 @@ struct Level3OrderExecuted {
     std::int64_t price {};
     std::uint64_t quantity {};
     std::uint64_t sequence_number {};
+    Symbol symbol {default_symbol};
 };
 
 struct Level3OrderDeleted {
     std::uint64_t order_id {};
     std::uint64_t sequence_number {};
+    Symbol symbol {default_symbol};
 };
 
 namespace detail {
@@ -176,18 +273,55 @@ std::optional<Integer> read_integer(
     return static_cast<Integer>(value);
 }
 
+inline void write_symbol(
+    std::span<std::byte> output,
+    std::size_t& offset,
+    const Symbol& symbol
+) {
+    for (const char character : symbol) {
+        output[offset++] = static_cast<std::byte>(
+            static_cast<unsigned char>(character)
+        );
+    }
+}
+
+inline std::optional<Symbol> read_symbol(
+    std::span<const std::byte> input,
+    std::size_t& offset
+) {
+    if (offset + symbol_size > input.size()) {
+        return std::nullopt;
+    }
+
+    Symbol symbol {};
+
+    for (std::size_t index = 0; index < symbol_size; ++index) {
+        symbol[index] = static_cast<char>(
+            std::to_integer<unsigned char>(
+                input[offset++]
+            )
+        );
+    }
+
+    if (!is_valid_symbol(symbol)) {
+        return std::nullopt;
+    }
+
+    return symbol;
+}
+
 }  // namespace detail
 
 constexpr std::size_t header_size = 20;
-constexpr std::size_t new_order_body_size = 35;
-constexpr std::size_t cancel_order_body_size = 16;
-constexpr std::size_t replace_order_body_size = 32;
+constexpr std::size_t new_order_body_size = 43;
+constexpr std::size_t cancel_order_body_size = 24;
+constexpr std::size_t replace_order_body_size = 40;
 constexpr std::size_t order_response_body_size = 17;
-constexpr std::size_t trade_execution_body_size = 40;
-constexpr std::size_t book_update_body_size = 42;
-constexpr std::size_t level3_add_order_body_size = 41;
-constexpr std::size_t level3_order_executed_body_size = 40;
-constexpr std::size_t level3_order_deleted_body_size = 16;
+constexpr std::size_t trade_execution_body_size = 48;
+constexpr std::size_t book_update_body_size = 50;
+constexpr std::size_t level3_add_order_body_size = 49;
+constexpr std::size_t level3_order_executed_body_size = 48;
+constexpr std::size_t level3_order_deleted_body_size = 24;
 
 inline std::array<std::byte, header_size> encode_header(
     const MessageHeader& header
@@ -337,6 +471,12 @@ encode_new_order(
         )
     );
 
+    detail::write_symbol(
+        output,
+        offset,
+        request.symbol
+    );
+
     return output;
 }
 
@@ -391,6 +531,12 @@ inline std::optional<NewOrderRequest> decode_new_order(
             offset
         );
 
+    const auto symbol =
+        detail::read_symbol(
+            input,
+            offset
+        );
+
     if (
         !order_id ||
         !timestamp ||
@@ -398,7 +544,8 @@ inline std::optional<NewOrderRequest> decode_new_order(
         !quantity ||
         !side ||
         !order_type ||
-        !time_in_force
+        !time_in_force ||
+        !symbol
     ) {
         return std::nullopt;
     }
@@ -449,7 +596,8 @@ inline std::optional<NewOrderRequest> decode_new_order(
         .order_type =
             static_cast<OrderType>(*order_type),
         .time_in_force =
-            static_cast<TimeInForce>(*time_in_force)
+            static_cast<TimeInForce>(*time_in_force),
+        .symbol = *symbol
     };
 }
 
@@ -463,6 +611,7 @@ encode_cancel_order(
 
     detail::write_integer(output, offset, request.order_id);
     detail::write_integer(output, offset, request.timestamp);
+    detail::write_symbol(output, offset, request.symbol);
 
     return output;
 }
@@ -480,14 +629,17 @@ inline std::optional<CancelOrderRequest> decode_cancel_order(
         detail::read_integer<std::uint64_t>(input, offset);
     const auto timestamp =
         detail::read_integer<std::uint64_t>(input, offset);
+    const auto symbol =
+        detail::read_symbol(input, offset);
 
-    if (!order_id || !timestamp) {
+    if (!order_id || !timestamp || !symbol) {
         return std::nullopt;
     }
 
     return CancelOrderRequest {
         .order_id = *order_id,
-        .timestamp = *timestamp
+        .timestamp = *timestamp,
+        .symbol = *symbol
     };
 }
 
@@ -502,6 +654,7 @@ encode_replace_order(
     detail::write_integer(output, offset, request.timestamp);
     detail::write_integer(output, offset, request.new_price);
     detail::write_integer(output, offset, request.new_quantity);
+    detail::write_symbol(output, offset, request.symbol);
 
     return output;
 }
@@ -523,8 +676,10 @@ inline std::optional<ReplaceOrderRequest> decode_replace_order(
         detail::read_integer<std::int64_t>(input, offset);
     const auto new_quantity =
         detail::read_integer<std::uint64_t>(input, offset);
+    const auto symbol =
+        detail::read_symbol(input, offset);
 
-    if (!order_id || !timestamp || !new_price || !new_quantity) {
+    if (!order_id || !timestamp || !new_price || !new_quantity || !symbol) {
         return std::nullopt;
     }
 
@@ -536,7 +691,8 @@ inline std::optional<ReplaceOrderRequest> decode_replace_order(
         .order_id = *order_id,
         .timestamp = *timestamp,
         .new_price = *new_price,
-        .new_quantity = *new_quantity
+        .new_quantity = *new_quantity,
+        .symbol = *symbol
     };
 }
 
@@ -662,6 +818,12 @@ inline std::array<
         execution.sequence_number
     );
 
+    detail::write_symbol(
+        output,
+        offset,
+        execution.symbol
+    );
+
     return output;
 }
 
@@ -705,12 +867,19 @@ decode_trade_execution(
             offset
         );
 
+    const auto symbol =
+        detail::read_symbol(
+            input,
+            offset
+        );
+
     if (
         !buy_order_id ||
         !sell_order_id ||
         !price ||
         !quantity ||
-        !sequence_number
+        !sequence_number ||
+        !symbol
     ) {
         return std::nullopt;
     }
@@ -724,7 +893,8 @@ decode_trade_execution(
         .sell_order_id = *sell_order_id,
         .price = *price,
         .quantity = *quantity,
-        .sequence_number = *sequence_number
+        .sequence_number = *sequence_number,
+        .symbol = *symbol
     };
 }
 
@@ -783,6 +953,12 @@ inline std::array<
         update.sequence_number
     );
 
+    detail::write_symbol(
+        output,
+        offset,
+        update.symbol
+    );
+
     return output;
 }
 
@@ -837,6 +1013,12 @@ inline std::optional<BookUpdate> decode_book_update(
             offset
         );
 
+    const auto symbol =
+        detail::read_symbol(
+            input,
+            offset
+        );
+
     if (
         !has_bid ||
         !best_bid ||
@@ -844,7 +1026,8 @@ inline std::optional<BookUpdate> decode_book_update(
         !has_ask ||
         !best_ask ||
         !ask_quantity ||
-        !sequence_number
+        !sequence_number ||
+        !symbol
     ) {
         return std::nullopt;
     }
@@ -877,7 +1060,8 @@ inline std::optional<BookUpdate> decode_book_update(
         .has_ask = *has_ask,
         .best_ask = *best_ask,
         .ask_quantity = *ask_quantity,
-        .sequence_number = *sequence_number
+        .sequence_number = *sequence_number,
+        .symbol = *symbol
     };
 }
 
@@ -892,6 +1076,7 @@ encode_level3_add_order(const Level3AddOrder& event) {
     detail::write_integer(output, offset, event.quantity);
     detail::write_integer(output, offset, static_cast<std::uint8_t>(event.side));
     detail::write_integer(output, offset, event.sequence_number);
+    detail::write_symbol(output, offset, event.symbol);
     return output;
 }
 
@@ -906,7 +1091,8 @@ inline std::optional<Level3AddOrder> decode_level3_add_order(
     const auto quantity = detail::read_integer<std::uint64_t>(input, offset);
     const auto side = detail::read_integer<std::uint8_t>(input, offset);
     const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
-    if (!order_id || !timestamp || !price || !quantity || !side || !sequence_number) return std::nullopt;
+    const auto symbol = detail::read_symbol(input, offset);
+    if (!order_id || !timestamp || !price || !quantity || !side || !sequence_number || !symbol) return std::nullopt;
     if (*quantity == 0) return std::nullopt;
     if (*side != static_cast<std::uint8_t>(Side::Buy) &&
         *side != static_cast<std::uint8_t>(Side::Sell)) return std::nullopt;
@@ -916,7 +1102,8 @@ inline std::optional<Level3AddOrder> decode_level3_add_order(
         .price = *price,
         .quantity = *quantity,
         .side = static_cast<Side>(*side),
-        .sequence_number = *sequence_number
+        .sequence_number = *sequence_number,
+        .symbol = *symbol
     };
 }
 
@@ -929,6 +1116,7 @@ encode_level3_order_executed(const Level3OrderExecuted& event) {
     detail::write_integer(output, offset, event.price);
     detail::write_integer(output, offset, event.quantity);
     detail::write_integer(output, offset, event.sequence_number);
+    detail::write_symbol(output, offset, event.symbol);
     return output;
 }
 
@@ -942,13 +1130,15 @@ inline std::optional<Level3OrderExecuted> decode_level3_order_executed(
     const auto price = detail::read_integer<std::int64_t>(input, offset);
     const auto quantity = detail::read_integer<std::uint64_t>(input, offset);
     const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
-    if (!buy_order_id || !sell_order_id || !price || !quantity || !sequence_number || *quantity == 0) return std::nullopt;
+    const auto symbol = detail::read_symbol(input, offset);
+    if (!buy_order_id || !sell_order_id || !price || !quantity || !sequence_number || !symbol || *quantity == 0) return std::nullopt;
     return Level3OrderExecuted {
         .buy_order_id = *buy_order_id,
         .sell_order_id = *sell_order_id,
         .price = *price,
         .quantity = *quantity,
-        .sequence_number = *sequence_number
+        .sequence_number = *sequence_number,
+        .symbol = *symbol
     };
 }
 
@@ -958,6 +1148,7 @@ encode_level3_order_deleted(const Level3OrderDeleted& event) {
     std::size_t offset = 0;
     detail::write_integer(output, offset, event.order_id);
     detail::write_integer(output, offset, event.sequence_number);
+    detail::write_symbol(output, offset, event.symbol);
     return output;
 }
 
@@ -968,10 +1159,12 @@ inline std::optional<Level3OrderDeleted> decode_level3_order_deleted(
     std::size_t offset = 0;
     const auto order_id = detail::read_integer<std::uint64_t>(input, offset);
     const auto sequence_number = detail::read_integer<std::uint64_t>(input, offset);
-    if (!order_id || !sequence_number) return std::nullopt;
+    const auto symbol = detail::read_symbol(input, offset);
+    if (!order_id || !sequence_number || !symbol) return std::nullopt;
     return Level3OrderDeleted {
         .order_id = *order_id,
-        .sequence_number = *sequence_number
+        .sequence_number = *sequence_number,
+        .symbol = *symbol
     };
 }
 
