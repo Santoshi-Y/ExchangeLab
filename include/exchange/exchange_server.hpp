@@ -14,6 +14,7 @@
 
 #include "exchange/journal.hpp"
 #include "exchange/matching_engine.hpp"
+#include "exchange/multicast_publisher.hpp"
 #include "exchange/order_book.hpp"
 #include "exchange/protocol.hpp"
 #include "exchange/tcp_server.hpp"
@@ -39,6 +40,8 @@ public:
     explicit ExchangeServer(
         std::uint16_t port,
         std::optional<std::filesystem::path> journal_path =
+            std::nullopt,
+        std::optional<MulticastConfig> multicast_config =
             std::nullopt
     );
 
@@ -172,6 +175,9 @@ private:
 
     std::optional<std::filesystem::path> journal_path_;
     std::unique_ptr<ExchangeJournal> journal_;
+
+    std::optional<MulticastConfig> multicast_config_;
+    std::unique_ptr<MulticastPublisher> multicast_publisher_;
     std::mutex journal_processing_mutex_;
 
     RecoveryState recovery_state_;

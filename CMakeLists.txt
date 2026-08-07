@@ -19,6 +19,7 @@ add_library(
     exchange_lab_lib
     src/tcp_server.cpp
     src/exchange_server.cpp
+    src/multicast_publisher.cpp
     src/journal.cpp
     src/replay.cpp
 )
@@ -90,6 +91,17 @@ target_link_libraries(
         exchange_lab_lib
 )
 
+add_executable(
+    exchange_market_data_listener
+    tools/exchange_market_data_listener.cpp
+)
+
+target_link_libraries(
+    exchange_market_data_listener
+    PRIVATE
+        exchange_lab_lib
+)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
         exchange_lab
@@ -114,6 +126,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             -Wextra
             -Wpedantic
     )
+
+    target_compile_options(
+        exchange_market_data_listener
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
 elseif(MSVC)
     target_compile_options(
         exchange_lab
@@ -129,6 +149,12 @@ elseif(MSVC)
 
     target_compile_options(
         exchange_client
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_market_data_listener
         PRIVATE
             /W4
     )

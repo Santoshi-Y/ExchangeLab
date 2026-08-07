@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "exchange/journal.hpp"
+#include "exchange/multicast_publisher.hpp"
 #include "exchange/order.hpp"
 #include "exchange/protocol.hpp"
 #include "exchange/replay.hpp"
@@ -100,10 +101,12 @@ std::vector<std::byte> combine_message(
 
 ExchangeServer::ExchangeServer(
     std::uint16_t port,
-    std::optional<std::filesystem::path> journal_path
+    std::optional<std::filesystem::path> journal_path,
+    std::optional<MulticastConfig> multicast_config
 )
     : server_(port),
       journal_path_(std::move(journal_path)),
+      multicast_config_(std::move(multicast_config)),
       running_(false),
       next_sequence_number_(1) {}
 
@@ -243,7 +246,30 @@ bool ExchangeServer::start() {
         }
     }
 
+    if (
+        multicast_config_.has_value() &&
+        multicast_publisher_ == nullptr
+    ) {
+        multicast_publisher_ =
+            std::make_unique<MulticastPublisher>(
+                *multicast_config_
+            );
+
+        if (!multicast_publisher_->start()) {
+            std::cerr
+                << "Failed to start market-data multicast publisher\n";
+
+            multicast_publisher_.reset();
+            return false;
+        }
+    }
+
     if (!server_.start()) {
+        if (multicast_publisher_ != nullptr) {
+            multicast_publisher_->stop();
+            multicast_publisher_.reset();
+        }
+
         return false;
     }
 
@@ -318,6 +344,11 @@ void ExchangeServer::stop() {
         for (const int socket : sockets) {
             TcpServer::close_connection(socket);
         }
+    }
+
+    if (multicast_publisher_ != nullptr) {
+        multicast_publisher_->stop();
+        multicast_publisher_.reset();
     }
 
     if (journal_ != nullptr) {
@@ -1229,6 +1260,14 @@ void ExchangeServer::broadcast_book_update(
             body
         );
 
+    if (
+        multicast_publisher_ != nullptr &&
+        !multicast_publisher_->send(message)
+    ) {
+        std::cerr
+            << "Failed to publish multicast market-data datagram\n";
+    }
+
     const std::vector<int> clients =
         client_socket_snapshot();
 
@@ -1272,6 +1311,14 @@ void ExchangeServer::broadcast_level3_add_order(
     const auto encoded_header = protocol::encode_header(header);
     const std::vector<std::byte> message =
         combine_message(encoded_header, body);
+    if (
+        multicast_publisher_ != nullptr &&
+        !multicast_publisher_->send(message)
+    ) {
+        std::cerr
+            << "Failed to publish multicast market-data datagram\n";
+    }
+
     const std::vector<int> clients = client_socket_snapshot();
 
     std::lock_guard<std::mutex> send_lock(send_mutex_);
@@ -1304,6 +1351,14 @@ void ExchangeServer::broadcast_level3_order_executed(
     const auto encoded_header = protocol::encode_header(header);
     const std::vector<std::byte> message =
         combine_message(encoded_header, body);
+    if (
+        multicast_publisher_ != nullptr &&
+        !multicast_publisher_->send(message)
+    ) {
+        std::cerr
+            << "Failed to publish multicast market-data datagram\n";
+    }
+
     const std::vector<int> clients = client_socket_snapshot();
 
     std::lock_guard<std::mutex> send_lock(send_mutex_);
@@ -1336,6 +1391,14 @@ void ExchangeServer::broadcast_level3_order_deleted(
     const auto encoded_header = protocol::encode_header(header);
     const std::vector<std::byte> message =
         combine_message(encoded_header, body);
+    if (
+        multicast_publisher_ != nullptr &&
+        !multicast_publisher_->send(message)
+    ) {
+        std::cerr
+            << "Failed to publish multicast market-data datagram\n";
+    }
+
     const std::vector<int> clients = client_socket_snapshot();
 
     std::lock_guard<std::mutex> send_lock(send_mutex_);

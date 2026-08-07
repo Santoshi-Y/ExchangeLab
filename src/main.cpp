@@ -10,9 +10,16 @@ int main() {
     const std::filesystem::path journal_path =
         "exchange.log";
 
+    const exchange::MulticastConfig multicast {
+        .group = "239.255.0.1",
+        .port = 9100,
+        .ttl = 1
+    };
+
     exchange::ExchangeServer server(
         port,
-        journal_path
+        journal_path,
+        multicast
     );
 
     if (!server.start()) {
