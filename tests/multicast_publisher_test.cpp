@@ -17,7 +17,7 @@ TEST(
 ) {
     exchange::MulticastPublisher publisher(
         exchange::MulticastConfig {
-            .group = "239.255.0.1",
+            .group = "127.0.0.1",
             .port = 19100,
             .ttl = 1
         }
@@ -37,7 +37,7 @@ TEST(
 ) {
     exchange::MulticastPublisher publisher(
         exchange::MulticastConfig {
-            .group = "239.255.0.1",
+            .group = "127.0.0.1",
             .port = 19101,
             .ttl = 1
         }
@@ -86,7 +86,7 @@ TEST(
 ) {
     exchange::MulticastPublisher publisher(
         exchange::MulticastConfig {
-            .group = "239.255.0.1",
+            .group = "127.0.0.1",
             .port = 19102,
             .ttl = 1
         }
