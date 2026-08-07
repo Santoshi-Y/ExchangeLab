@@ -3,30 +3,51 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <map>
+#include <memory>
+#include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
+#include "exchange/memory_pool.hpp"
 #include "exchange/price_level.hpp"
 
 namespace exchange {
 
+/*
+ * OrderBook stores its hot-path container nodes in a per-book PMR pool.
+ *
+ * The State indirection is deliberate. std::pmr containers are tied to their
+ * memory_resource, while journal recovery needs OrderBook::swap(). Swapping
+ * the single State pointer moves the pool and every container together, so
+ * iterators in order_locations_ remain valid and allocator ownership stays
+ * correct.
+ */
 class OrderBook {
 public:
-    using BidLevels = std::map<
+    using BidLevels = std::pmr::map<
         Price,
         PriceLevel,
         std::greater<Price>
     >;
 
-    using AskLevels = std::map<
+    using AskLevels = std::pmr::map<
         Price,
         PriceLevel,
         std::less<Price>
     >;
+
+    OrderBook()
+        : state_(std::make_unique<State>()) {}
+
+    ~OrderBook() = default;
+
+    OrderBook(const OrderBook&) = delete;
+    OrderBook& operator=(const OrderBook&) = delete;
+    OrderBook(OrderBook&&) noexcept = default;
+    OrderBook& operator=(OrderBook&&) noexcept = default;
 
     void add_order(Order order) {
         if (contains(order.id)) {
@@ -52,18 +73,20 @@ public:
         const Price price = order.price;
 
         if (side == Side::Buy) {
-            auto level_result =
-                bids_.try_emplace(price, price);
+            auto level_result = state_->bids.try_emplace(
+                price,
+                price,
+                state_->memory_pool.resource()
+            );
 
-            auto level_iterator =
-                level_result.first;
+            auto level_iterator = level_result.first;
 
             auto order_iterator =
                 level_iterator->second.add_order(
                     std::move(order)
                 );
 
-            order_locations_.emplace(
+            state_->order_locations.emplace(
                 order_id,
                 OrderLocation {
                     .side = side,
@@ -75,18 +98,20 @@ public:
             return;
         }
 
-        auto level_result =
-            asks_.try_emplace(price, price);
+        auto level_result = state_->asks.try_emplace(
+            price,
+            price,
+            state_->memory_pool.resource()
+        );
 
-        auto level_iterator =
-            level_result.first;
+        auto level_iterator = level_result.first;
 
         auto order_iterator =
             level_iterator->second.add_order(
                 std::move(order)
             );
 
-        order_locations_.emplace(
+        state_->order_locations.emplace(
             order_id,
             OrderLocation {
                 .side = side,
@@ -96,9 +121,7 @@ public:
         );
     }
 
-    [[nodiscard]] bool cancel_order(
-        OrderId order_id
-    ) {
+    [[nodiscard]] bool cancel_order(OrderId order_id) {
         return extract_order(order_id).has_value();
     }
 
@@ -106,23 +129,25 @@ public:
         OrderId order_id
     ) {
         const auto location_iterator =
-            order_locations_.find(order_id);
+            state_->order_locations.find(order_id);
 
-        if (location_iterator == order_locations_.end()) {
+        if (
+            location_iterator ==
+            state_->order_locations.end()
+        ) {
             return std::nullopt;
         }
 
         const OrderLocation location =
             location_iterator->second;
 
-        Order extracted_order =
-            *location.order_iterator;
+        Order extracted_order = *location.order_iterator;
 
         if (location.side == Side::Buy) {
             auto level_iterator =
-                bids_.find(location.price);
+                state_->bids.find(location.price);
 
-            if (level_iterator == bids_.end()) {
+            if (level_iterator == state_->bids.end()) {
                 throw std::logic_error(
                     "Bid order index is inconsistent"
                 );
@@ -133,13 +158,13 @@ public:
             );
 
             if (level_iterator->second.empty()) {
-                bids_.erase(level_iterator);
+                state_->bids.erase(level_iterator);
             }
         } else {
             auto level_iterator =
-                asks_.find(location.price);
+                state_->asks.find(location.price);
 
-            if (level_iterator == asks_.end()) {
+            if (level_iterator == state_->asks.end()) {
                 throw std::logic_error(
                     "Ask order index is inconsistent"
                 );
@@ -150,11 +175,11 @@ public:
             );
 
             if (level_iterator->second.empty()) {
-                asks_.erase(level_iterator);
+                state_->asks.erase(level_iterator);
             }
         }
 
-        order_locations_.erase(location_iterator);
+        state_->order_locations.erase(location_iterator);
 
         return extracted_order;
     }
@@ -162,16 +187,19 @@ public:
     [[nodiscard]] bool contains(
         OrderId order_id
     ) const noexcept {
-        return order_locations_.contains(order_id);
+        return state_->order_locations.contains(order_id);
     }
 
     [[nodiscard]] const Order* find_order(
         OrderId order_id
     ) const noexcept {
         const auto location_iterator =
-            order_locations_.find(order_id);
+            state_->order_locations.find(order_id);
 
-        if (location_iterator == order_locations_.end()) {
+        if (
+            location_iterator ==
+            state_->order_locations.end()
+        ) {
             return nullptr;
         }
 
@@ -182,9 +210,12 @@ public:
         OrderId order_id
     ) noexcept {
         const auto location_iterator =
-            order_locations_.find(order_id);
+            state_->order_locations.find(order_id);
 
-        if (location_iterator == order_locations_.end()) {
+        if (
+            location_iterator ==
+            state_->order_locations.end()
+        ) {
             return nullptr;
         }
 
@@ -192,103 +223,97 @@ public:
     }
 
     [[nodiscard]] std::size_t order_count() const noexcept {
-        return order_locations_.size();
+        return state_->order_locations.size();
     }
 
     void swap(OrderBook& other) noexcept {
-        bids_.swap(other.bids_);
-        asks_.swap(other.asks_);
-        order_locations_.swap(other.order_locations_);
+        state_.swap(other.state_);
     }
 
     [[nodiscard]] bool empty() const noexcept {
-        return bids_.empty() && asks_.empty();
+        return state_->bids.empty() && state_->asks.empty();
     }
 
     [[nodiscard]] bool has_bids() const noexcept {
-        return !bids_.empty();
+        return !state_->bids.empty();
     }
 
     [[nodiscard]] bool has_asks() const noexcept {
-        return !asks_.empty();
+        return !state_->asks.empty();
     }
 
     [[nodiscard]] Price best_bid() const {
-        if (bids_.empty()) {
+        if (state_->bids.empty()) {
             throw std::out_of_range(
                 "Order book has no bids"
             );
         }
 
-        return bids_.begin()->first;
+        return state_->bids.begin()->first;
     }
 
     [[nodiscard]] Price best_ask() const {
-        if (asks_.empty()) {
+        if (state_->asks.empty()) {
             throw std::out_of_range(
                 "Order book has no asks"
             );
         }
 
-        return asks_.begin()->first;
+        return state_->asks.begin()->first;
     }
 
     [[nodiscard]] PriceLevel& best_bid_level() {
-        if (bids_.empty()) {
+        if (state_->bids.empty()) {
             throw std::out_of_range(
                 "Order book has no bids"
             );
         }
 
-        return bids_.begin()->second;
+        return state_->bids.begin()->second;
     }
 
     [[nodiscard]] const PriceLevel&
     best_bid_level() const {
-        if (bids_.empty()) {
+        if (state_->bids.empty()) {
             throw std::out_of_range(
                 "Order book has no bids"
             );
         }
 
-        return bids_.begin()->second;
+        return state_->bids.begin()->second;
     }
 
     [[nodiscard]] PriceLevel& best_ask_level() {
-        if (asks_.empty()) {
+        if (state_->asks.empty()) {
             throw std::out_of_range(
                 "Order book has no asks"
             );
         }
 
-        return asks_.begin()->second;
+        return state_->asks.begin()->second;
     }
 
     [[nodiscard]] const PriceLevel&
     best_ask_level() const {
-        if (asks_.empty()) {
+        if (state_->asks.empty()) {
             throw std::out_of_range(
                 "Order book has no asks"
             );
         }
 
-        return asks_.begin()->second;
+        return state_->asks.begin()->second;
     }
 
-    /*
-     * Returns the quantity currently executable against
-     * the incoming order without modifying the book.
-     *
-     * A 64-bit accumulator avoids overflow while summing
-     * multiple 32-bit price-level quantities.
-     */
     [[nodiscard]] std::uint64_t executable_quantity(
         const Order& incoming
     ) const noexcept {
         std::uint64_t available = 0;
 
         if (incoming.side == Side::Buy) {
-            for (const auto& [price, level] : asks_) {
+            for (
+                const auto& [price, level] :
+                state_->asks
+            ) {
                 if (
                     incoming.type == OrderType::Limit &&
                     price > incoming.price
@@ -313,7 +338,9 @@ public:
             return available;
         }
 
-        for (const auto& [price, level] : bids_) {
+        for (
+            const auto& [price, level] : state_->bids
+        ) {
             if (
                 incoming.type == OrderType::Limit &&
                 price < incoming.price
@@ -340,24 +367,29 @@ public:
 
     void remove_best_bid_if_empty() {
         if (
-            !bids_.empty() &&
-            bids_.begin()->second.empty()
+            !state_->bids.empty() &&
+            state_->bids.begin()->second.empty()
         ) {
-            bids_.erase(bids_.begin());
+            state_->bids.erase(state_->bids.begin());
         }
     }
 
     void remove_best_ask_if_empty() {
         if (
-            !asks_.empty() &&
-            asks_.begin()->second.empty()
+            !state_->asks.empty() &&
+            state_->asks.begin()->second.empty()
         ) {
-            asks_.erase(asks_.begin());
+            state_->asks.erase(state_->asks.begin());
         }
     }
 
     void remove_from_index(OrderId order_id) {
-        order_locations_.erase(order_id);
+        state_->order_locations.erase(order_id);
+    }
+
+    [[nodiscard]] MemoryPoolStats
+    memory_pool_stats() const noexcept {
+        return state_->memory_pool.stats();
     }
 
 private:
@@ -367,13 +399,34 @@ private:
         PriceLevel::iterator order_iterator;
     };
 
-    BidLevels bids_;
-    AskLevels asks_;
+    struct State {
+        State()
+            : memory_pool(),
+              bids(
+                  std::greater<Price> {},
+                  memory_pool.resource()
+              ),
+              asks(
+                  std::less<Price> {},
+                  memory_pool.resource()
+              ),
+              order_locations(
+                  0,
+                  std::hash<OrderId> {},
+                  std::equal_to<OrderId> {},
+                  memory_pool.resource()
+              ) {}
 
-    std::unordered_map<
-        OrderId,
-        OrderLocation
-    > order_locations_;
+        MemoryPool memory_pool;
+        BidLevels bids;
+        AskLevels asks;
+        std::pmr::unordered_map<
+            OrderId,
+            OrderLocation
+        > order_locations;
+    };
+
+    std::unique_ptr<State> state_;
 };
 
 }  // namespace exchange

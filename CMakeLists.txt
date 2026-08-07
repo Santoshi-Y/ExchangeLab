@@ -346,6 +346,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/multi_symbol_test.cpp
         tests/risk_engine_test.cpp
         tests/fix_gateway_test.cpp
+        tests/memory_pool_test.cpp
         src/websocket_gateway.cpp
     )
 
@@ -474,9 +475,29 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
             Threads::Threads
     )
 
+    add_executable(
+        exchange_lab_memory_pool_benchmark
+        benchmarks/memory_pool_benchmark.cpp
+    )
+
+    target_link_libraries(
+        exchange_lab_memory_pool_benchmark
+        PRIVATE
+            exchange_lab_lib
+            Threads::Threads
+    )
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(
             exchange_lab_throughput_benchmark
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+        )
+
+        target_compile_options(
+            exchange_lab_memory_pool_benchmark
             PRIVATE
                 -Wall
                 -Wextra
@@ -517,6 +538,12 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
     elseif(MSVC)
         target_compile_options(
             exchange_lab_throughput_benchmark
+            PRIVATE
+                /W4
+        )
+
+        target_compile_options(
+            exchange_lab_memory_pool_benchmark
             PRIVATE
                 /W4
         )
