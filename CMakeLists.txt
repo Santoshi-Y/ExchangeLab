@@ -347,6 +347,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/risk_engine_test.cpp
         tests/fix_gateway_test.cpp
         tests/memory_pool_test.cpp
+        tests/lock_free_ring_test.cpp
         src/websocket_gateway.cpp
     )
 
@@ -487,6 +488,23 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
             Threads::Threads
     )
 
+    add_executable(
+        exchange_lab_lock_free_queue_benchmark
+        benchmarks/lock_free_queue_benchmark.cpp
+    )
+
+    target_link_libraries(
+        exchange_lab_lock_free_queue_benchmark
+        PRIVATE
+            Threads::Threads
+    )
+
+    target_include_directories(
+        exchange_lab_lock_free_queue_benchmark
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(
             exchange_lab_throughput_benchmark
@@ -498,6 +516,14 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
 
         target_compile_options(
             exchange_lab_memory_pool_benchmark
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+        )
+
+        target_compile_options(
+            exchange_lab_lock_free_queue_benchmark
             PRIVATE
                 -Wall
                 -Wextra
@@ -544,6 +570,12 @@ if(EXCHANGELAB_BUILD_BENCHMARKS)
 
         target_compile_options(
             exchange_lab_memory_pool_benchmark
+            PRIVATE
+                /W4
+        )
+
+        target_compile_options(
+            exchange_lab_lock_free_queue_benchmark
             PRIVATE
                 /W4
         )
