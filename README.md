@@ -609,20 +609,3 @@ The shared MPSC prototype benchmarked worse than a mutex under four-producer con
 Recovery replays protocol events instead of persisting in-memory pointer/container layouts, keeping journal data independent of allocator internals.
 
 ---
-
-## Current Limitations
-
-ExchangeLab is intentionally not presented as production exchange infrastructure.
-
-Current limitations include:
-
-- FIX support is a subset
-- No TLS on demo connectivity
-- No durable socket/client identity across restart
-- No HA, replication, or leader election
-- No kernel-bypass networking
-- No hardware timestamping
-- WebSocket gateway is read-only
-- Benchmark results are localhost development-machine measurements
-
----
