@@ -59,6 +59,46 @@ elseif(MSVC)
     )
 endif()
 
+add_library(
+    exchange_fix_lib
+    src/fix.cpp
+    src/fix_gateway.cpp
+)
+
+target_include_directories(
+    exchange_fix_lib
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_features(
+    exchange_fix_lib
+    PUBLIC
+        cxx_std_20
+)
+
+target_link_libraries(
+    exchange_fix_lib
+    PUBLIC
+        Threads::Threads
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+        exchange_fix_lib
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+elseif(MSVC)
+    target_compile_options(
+        exchange_fix_lib
+        PRIVATE
+            /W4
+    )
+endif()
+
 add_executable(
     exchange_lab
     src/main.cpp
@@ -112,6 +152,30 @@ target_link_libraries(
     exchange_risk_demo
     PRIVATE
         exchange_lab_lib
+)
+
+add_executable(
+    exchange_fix_gateway
+    tools/exchange_fix_gateway.cpp
+)
+
+target_link_libraries(
+    exchange_fix_gateway
+    PRIVATE
+        exchange_fix_lib
+        Threads::Threads
+)
+
+add_executable(
+    exchange_fix_client
+    tools/exchange_fix_client.cpp
+)
+
+target_link_libraries(
+    exchange_fix_client
+    PRIVATE
+        exchange_fix_lib
+        Threads::Threads
 )
 
 add_executable(
@@ -169,6 +233,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     )
 
     target_compile_options(
+        exchange_fix_gateway
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    target_compile_options(
+        exchange_fix_client
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    target_compile_options(
         exchange_websocket_gateway
         PRIVATE
             -Wall
@@ -202,6 +282,18 @@ elseif(MSVC)
 
     target_compile_options(
         exchange_risk_demo
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_fix_gateway
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_fix_client
         PRIVATE
             /W4
     )
@@ -253,6 +345,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/websocket_gateway_test.cpp
         tests/multi_symbol_test.cpp
         tests/risk_engine_test.cpp
+        tests/fix_gateway_test.cpp
         src/websocket_gateway.cpp
     )
 
@@ -260,6 +353,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         exchange_lab_tests
         PRIVATE
             exchange_lab_lib
+            exchange_fix_lib
             GTest::gtest_main
             Threads::Threads
     )
