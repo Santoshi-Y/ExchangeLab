@@ -4,6 +4,7 @@
 
 #include "exchange/exchange_server.hpp"
 #include "exchange/protocol.hpp"
+#include "exchange/risk_engine.hpp"
 
 int main() {
     constexpr std::uint16_t port = 9000;
@@ -17,10 +18,13 @@ int main() {
         .ttl = 1
     };
 
+    const exchange::RiskLimits risk_limits {};
+
     exchange::ExchangeServer server(
         port,
         journal_path,
-        multicast
+        multicast,
+        risk_limits
     );
 
     if (!server.start()) {
@@ -61,6 +65,9 @@ int main() {
             << '\n';
     }
 
+    const exchange::RiskLimits& active_risk =
+        server.risk_limits();
+
     std::cout
         << "ExchangeLab listening on port "
         << port
@@ -75,6 +82,22 @@ int main() {
         << multicast.group
         << ':'
         << multicast.port
+        << '\n'
+        << "Risk limits:\n"
+        << "  Max order quantity: "
+        << active_risk.max_order_quantity
+        << '\n'
+        << "  Max order notional: "
+        << active_risk.max_order_notional
+        << '\n'
+        << "  Max open orders/session: "
+        << active_risk.max_open_orders
+        << '\n'
+        << "  Max open quantity/session: "
+        << active_risk.max_open_quantity
+        << '\n'
+        << "  Max position/symbol: +/-"
+        << active_risk.max_position_per_symbol
         << '\n';
 
     server.run();

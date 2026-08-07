@@ -104,13 +104,16 @@ std::vector<std::byte> combine_message(
 ExchangeServer::ExchangeServer(
     std::uint16_t port,
     std::optional<std::filesystem::path> journal_path,
-    std::optional<MulticastConfig> multicast_config
+    std::optional<MulticastConfig> multicast_config,
+    RiskLimits risk_limits
 )
     : server_(port),
+      risk_engine_(std::move(risk_limits)),
       journal_path_(std::move(journal_path)),
       multicast_config_(std::move(multicast_config)),
       running_(false),
-      next_sequence_number_(1) {}
+      next_sequence_number_(1),
+      next_risk_client_id_(1) {}
 
 ExchangeServer::~ExchangeServer() {
     stop();
@@ -289,6 +292,21 @@ ExchangeServer::recovery_state() const noexcept {
     return recovery_state_;
 }
 
+const RiskLimits&
+ExchangeServer::risk_limits() const noexcept {
+    return risk_engine_.limits();
+}
+
+void ExchangeServer::set_global_kill_switch(
+    bool enabled
+) {
+    std::lock_guard<std::mutex> lock(
+        engine_mutex_
+    );
+
+    risk_engine_.set_global_kill_switch(enabled);
+}
+
 void ExchangeServer::run() {
     while (running_.load()) {
         const int client_socket =
@@ -303,12 +321,15 @@ void ExchangeServer::run() {
             break;
         }
 
-        register_client(client_socket);
+        const RiskClientId risk_client_id =
+            register_client(client_socket);
 
         std::cout
             << "Client connected on socket "
             << client_socket
-            << '\n';
+            << " (risk session "
+            << risk_client_id
+            << ")\n";
 
         std::lock_guard<std::mutex> lock(
             threads_mutex_
@@ -456,24 +477,16 @@ void ExchangeServer::process_receive_buffer(
         };
 
         if (journal_ != nullptr) {
-            const std::vector<std::byte>
-                complete_message(
-                    receive_buffer.begin(),
-                    receive_buffer.begin() +
-                        static_cast<std::ptrdiff_t>(
-                            full_message_size
-                        )
-                );
-
             /*
-             * Serialize journaling and processing so replay sees
-             * exactly the same global message order as the live engine.
+             * Serialize processing for journaled sessions so accepted
+             * commands are written in exactly the same order in which
+             * they mutate the live engine. Individual handlers append
+             * only after validation and risk approval, which prevents a
+             * risk-rejected order from reappearing during recovery.
              */
             std::lock_guard<std::mutex> journal_lock(
                 journal_processing_mutex_
             );
-
-            journal_->append(complete_message);
 
             handle_message(
                 client_socket,
@@ -607,7 +620,28 @@ void ExchangeServer::handle_new_order(
             request->quantity
         );
 
+    const Side side =
+        convert_side(request->side);
+
+    const OrderType order_type =
+        convert_order_type(
+            request->order_type
+        );
+
+    const TimeInForce time_in_force =
+        convert_time_in_force(
+            request->time_in_force
+        );
+
+    const RiskClientId risk_client_id =
+        risk_client_id_for_socket(
+            client_socket
+        );
+
     bool accepted = false;
+    bool duplicate_order_id = false;
+    RiskRejectReason risk_reject_reason =
+        RiskRejectReason::None;
 
     std::vector<ExecutionDelivery> deliveries;
     std::vector<protocol::Level3OrderExecuted> level3_executions;
@@ -632,7 +666,7 @@ void ExchangeServer::handle_new_order(
         InstrumentState& instrument =
             instrument_for(symbol);
 
-        const bool duplicate_order_id =
+        duplicate_order_id =
             instrument.book.find_order(
                 request->order_id
             ) != nullptr ||
@@ -643,141 +677,209 @@ void ExchangeServer::handle_new_order(
         if (!duplicate_order_id) {
             const Order order {
                 .id = request->order_id,
-                .side =
-                    convert_side(request->side),
-                .type =
-                    convert_order_type(
-                        request->order_type
-                    ),
-                .time_in_force =
-                    convert_time_in_force(
-                        request->time_in_force
-                    ),
+                .side = side,
+                .type = order_type,
+                .time_in_force = time_in_force,
                 .price = request->price,
                 .initial_quantity = quantity,
                 .remaining_quantity = quantity,
                 .timestamp = request->timestamp
             };
 
-            engine_.process_order_into(
-                instrument.book,
-                order,
-                trade_buffer
-            );
+            std::optional<Price> reference_price;
 
-            accepted = true;
+            if (order_type == OrderType::Market) {
+                reference_price =
+                    market_reference_price(
+                        side,
+                        instrument.book
+                    );
+            }
 
-            deliveries.reserve(
-                trade_buffer.size()
-            );
+            const RiskDecision risk_decision =
+                risk_engine_.check_new_order({
+                    .client_id = risk_client_id,
+                    .symbol = symbol,
+                    .order_id = request->order_id,
+                    .side = side,
+                    .order_type = order_type,
+                    .time_in_force = time_in_force,
+                    .price = request->price,
+                    .quantity = quantity,
+                    .reference_price = reference_price
+                });
 
-            std::unordered_set<OrderId> deleted_order_ids;
+            if (!risk_decision.accepted) {
+                risk_reject_reason =
+                    risk_decision.reason;
+                trade_buffer.clear();
+            } else {
+                /*
+                 * Accepted-command journaling is deliberately performed
+                 * after validation/risk approval but before the matching
+                 * mutation. The outer journal-processing lock preserves
+                 * global command order across client threads.
+                 */
+                append_journal_record(
+                    header,
+                    body
+                );
 
-            for (const Trade& trade : trade_buffer) {
-                deliveries.push_back({
-                    .trade = trade,
-                    .symbol = request->symbol,
-                    .buyer_socket =
+                engine_.process_order_into(
+                    instrument.book,
+                    order,
+                    trade_buffer
+                );
+
+                accepted = true;
+
+                deliveries.reserve(
+                    trade_buffer.size()
+                );
+
+                std::unordered_set<OrderId>
+                    deleted_order_ids;
+
+                for (const Trade& trade : trade_buffer) {
+                    const OrderOwner buyer_owner =
                         find_order_owner(
                             instrument,
                             trade.buy_order_id,
                             request->order_id,
-                            client_socket
-                        ),
-                    .seller_socket =
+                            client_socket,
+                            risk_client_id
+                        );
+
+                    const OrderOwner seller_owner =
                         find_order_owner(
                             instrument,
                             trade.sell_order_id,
                             request->order_id,
-                            client_socket
-                        )
-                });
+                            client_socket,
+                            risk_client_id
+                        );
 
-                level3_executions.push_back({
-                    .buy_order_id = trade.buy_order_id,
-                    .sell_order_id = trade.sell_order_id,
-                    .price = static_cast<std::int64_t>(
-                        trade.price
-                    ),
-                    .quantity = static_cast<std::uint64_t>(
+                    deliveries.push_back({
+                        .trade = trade,
+                        .symbol = request->symbol,
+                        .buyer_socket = buyer_owner.socket,
+                        .seller_socket = seller_owner.socket,
+                        .buyer_risk_client_id =
+                            buyer_owner.risk_client_id,
+                        .seller_risk_client_id =
+                            seller_owner.risk_client_id
+                    });
+
+                    risk_engine_.on_trade(
+                        symbol,
+                        buyer_owner.risk_client_id,
+                        seller_owner.risk_client_id,
+                        trade.buy_order_id,
+                        trade.sell_order_id,
                         trade.quantity
-                    ),
-                    .sequence_number = 0,
-                    .symbol = request->symbol
-                });
-
-                if (
-                    trade.buy_order_id != request->order_id &&
-                    instrument.book.find_order(
-                        trade.buy_order_id
-                    ) == nullptr
-                ) {
-                    deleted_order_ids.insert(
-                        trade.buy_order_id
                     );
+
+                    level3_executions.push_back({
+                        .buy_order_id = trade.buy_order_id,
+                        .sell_order_id = trade.sell_order_id,
+                        .price = static_cast<std::int64_t>(
+                            trade.price
+                        ),
+                        .quantity = static_cast<std::uint64_t>(
+                            trade.quantity
+                        ),
+                        .sequence_number = 0,
+                        .symbol = request->symbol
+                    });
+
+                    if (
+                        trade.buy_order_id != request->order_id &&
+                        instrument.book.find_order(
+                            trade.buy_order_id
+                        ) == nullptr
+                    ) {
+                        deleted_order_ids.insert(
+                            trade.buy_order_id
+                        );
+                    }
+
+                    if (
+                        trade.sell_order_id != request->order_id &&
+                        instrument.book.find_order(
+                            trade.sell_order_id
+                        ) == nullptr
+                    ) {
+                        deleted_order_ids.insert(
+                            trade.sell_order_id
+                        );
+                    }
                 }
 
-                if (
-                    trade.sell_order_id != request->order_id &&
-                    instrument.book.find_order(
-                        trade.sell_order_id
-                    ) == nullptr
+                for (
+                    const OrderId deleted_order_id :
+                    deleted_order_ids
                 ) {
-                    deleted_order_ids.insert(
-                        trade.sell_order_id
-                    );
+                    level3_deletions.push_back({
+                        .order_id = deleted_order_id,
+                        .sequence_number = 0,
+                        .symbol = request->symbol
+                    });
                 }
-            }
 
-            for (const OrderId deleted_order_id : deleted_order_ids) {
-                level3_deletions.push_back({
-                    .order_id = deleted_order_id,
-                    .sequence_number = 0,
-                    .symbol = request->symbol
-                });
-            }
-
-            remove_filled_order_owners(
-                instrument,
-                trade_buffer,
-                request->order_id
-            );
-
-            if (
-                instrument.book.find_order(
+                remove_filled_order_owners(
+                    instrument,
+                    trade_buffer,
                     request->order_id
-                ) != nullptr
-            ) {
-                instrument.order_owners[
-                    request->order_id
-                ] = client_socket;
+                );
 
-                const Order* resting_order =
+                if (
                     instrument.book.find_order(
                         request->order_id
+                    ) != nullptr
+                ) {
+                    instrument.order_owners[
+                        request->order_id
+                    ] = OrderOwner {
+                        .socket = client_socket,
+                        .risk_client_id = risk_client_id
+                    };
+
+                    const Order* resting_order =
+                        instrument.book.find_order(
+                            request->order_id
+                        );
+
+                    risk_engine_.on_order_resting(
+                        risk_client_id,
+                        symbol,
+                        resting_order->id,
+                        resting_order->side,
+                        resting_order->price,
+                        resting_order->remaining_quantity
                     );
 
-                level3_add = protocol::Level3AddOrder {
-                    .order_id = resting_order->id,
-                    .timestamp = resting_order->timestamp,
-                    .price = static_cast<std::int64_t>(
-                        resting_order->price
-                    ),
-                    .quantity = static_cast<std::uint64_t>(
-                        resting_order->remaining_quantity
-                    ),
-                    .side = resting_order->side == Side::Buy
-                        ? protocol::Side::Buy
-                        : protocol::Side::Sell,
-                    .sequence_number = 0,
-                    .symbol = request->symbol
-                };
-            }
+                    level3_add = protocol::Level3AddOrder {
+                        .order_id = resting_order->id,
+                        .timestamp = resting_order->timestamp,
+                        .price = static_cast<std::int64_t>(
+                            resting_order->price
+                        ),
+                        .quantity = static_cast<std::uint64_t>(
+                            resting_order->remaining_quantity
+                        ),
+                        .side = resting_order->side == Side::Buy
+                            ? protocol::Side::Buy
+                            : protocol::Side::Sell,
+                        .sequence_number = 0,
+                        .symbol = request->symbol
+                    };
+                }
 
-            snapshot = capture_book_snapshot(
-                request->symbol,
-                instrument.book
-            );
+                snapshot = capture_book_snapshot(
+                    request->symbol,
+                    instrument.book
+                );
+            }
         } else {
             trade_buffer.clear();
         }
@@ -792,7 +894,19 @@ void ExchangeServer::handle_new_order(
             << " from socket "
             << client_socket
             << '\n';
-    } else {
+    } else if (
+        risk_reject_reason !=
+        RiskRejectReason::None
+    ) {
+        std::cerr
+            << "Risk rejected "
+            << symbol
+            << " order "
+            << request->order_id
+            << ": "
+            << to_string(risk_reject_reason)
+            << '\n';
+    } else if (duplicate_order_id) {
         std::cerr
             << "Rejected duplicate "
             << symbol
@@ -853,6 +967,11 @@ void ExchangeServer::handle_cancel_order(
             request->symbol
         );
 
+    const RiskClientId risk_client_id =
+        risk_client_id_for_socket(
+            client_socket
+        );
+
     bool cancelled = false;
 
     BookSnapshot snapshot {
@@ -881,17 +1000,29 @@ void ExchangeServer::handle_cancel_order(
 
             if (
                 owner != instrument->order_owners.end() &&
-                owner->second == client_socket &&
+                owner->second.socket == client_socket &&
+                owner->second.risk_client_id == risk_client_id &&
                 instrument->book.find_order(
                     request->order_id
                 ) != nullptr
             ) {
+                append_journal_record(
+                    header,
+                    body
+                );
+
                 cancelled = engine_.cancel_order(
                     instrument->book,
                     request->order_id
                 );
 
                 if (cancelled) {
+                    risk_engine_.on_order_cancelled(
+                        owner->second.risk_client_id,
+                        symbol,
+                        request->order_id
+                    );
+
                     instrument->order_owners.erase(owner);
                     snapshot = capture_book_snapshot(
                         request->symbol,
@@ -968,7 +1099,15 @@ void ExchangeServer::handle_replace_order(
             request->new_quantity
         );
 
+    const RiskClientId risk_client_id =
+        risk_client_id_for_socket(
+            client_socket
+        );
+
     bool replaced = false;
+    RiskRejectReason risk_reject_reason =
+        RiskRejectReason::None;
+
     std::vector<ExecutionDelivery> deliveries;
     std::vector<protocol::Level3OrderExecuted> level3_executions;
     std::vector<protocol::Level3OrderDeleted> level3_deletions;
@@ -998,142 +1137,237 @@ void ExchangeServer::handle_replace_order(
                     request->order_id
                 );
 
-            if (
-                owner != instrument->order_owners.end() &&
-                owner->second == client_socket &&
+            const Order* existing_order =
                 instrument->book.find_order(
                     request->order_id
-                ) != nullptr
-            ) {
-                replaced = engine_.replace_order_into(
-                    instrument->book,
-                    request->order_id,
-                    request->new_price,
-                    new_quantity,
-                    request->timestamp,
-                    trade_buffer
                 );
 
-                if (replaced) {
-                    deliveries.reserve(
-                        trade_buffer.size()
+            if (
+                owner != instrument->order_owners.end() &&
+                owner->second.socket == client_socket &&
+                owner->second.risk_client_id == risk_client_id &&
+                existing_order != nullptr
+            ) {
+                const RiskDecision risk_decision =
+                    risk_engine_.check_replace(
+                        risk_client_id,
+                        symbol,
+                        request->order_id,
+                        request->new_price,
+                        new_quantity
                     );
 
-                    std::unordered_set<OrderId>
-                        deleted_order_ids;
+                if (!risk_decision.accepted) {
+                    risk_reject_reason =
+                        risk_decision.reason;
+                    trade_buffer.clear();
+                } else {
+                    const Order original_order =
+                        *existing_order;
 
-                    for (const Trade& trade : trade_buffer) {
-                        deliveries.push_back({
-                            .trade = trade,
-                            .symbol = request->symbol,
-                            .buyer_socket =
+                    append_journal_record(
+                        header,
+                        body
+                    );
+
+                    /*
+                     * Remove the original resting exposure before matching
+                     * the replacement. Any replacement remainder is added
+                     * back below with its new price and quantity.
+                     */
+                    risk_engine_.on_order_cancelled(
+                        risk_client_id,
+                        symbol,
+                        request->order_id
+                    );
+
+                    replaced = engine_.replace_order_into(
+                        instrument->book,
+                        request->order_id,
+                        request->new_price,
+                        new_quantity,
+                        request->timestamp,
+                        trade_buffer
+                    );
+
+                    if (!replaced) {
+                        risk_engine_.on_order_resting(
+                            risk_client_id,
+                            symbol,
+                            original_order.id,
+                            original_order.side,
+                            original_order.price,
+                            original_order.remaining_quantity
+                        );
+                    } else {
+                        deliveries.reserve(
+                            trade_buffer.size()
+                        );
+
+                        std::unordered_set<OrderId>
+                            deleted_order_ids;
+
+                        for (const Trade& trade : trade_buffer) {
+                            const OrderOwner buyer_owner =
                                 find_order_owner(
                                     *instrument,
                                     trade.buy_order_id,
                                     request->order_id,
-                                    client_socket
-                                ),
-                            .seller_socket =
+                                    client_socket,
+                                    risk_client_id
+                                );
+
+                            const OrderOwner seller_owner =
                                 find_order_owner(
                                     *instrument,
                                     trade.sell_order_id,
                                     request->order_id,
-                                    client_socket
-                                )
-                        });
+                                    client_socket,
+                                    risk_client_id
+                                );
 
-                        level3_executions.push_back({
-                            .buy_order_id = trade.buy_order_id,
-                            .sell_order_id = trade.sell_order_id,
-                            .price = static_cast<std::int64_t>(
-                                trade.price
-                            ),
-                            .quantity = static_cast<std::uint64_t>(
+                            deliveries.push_back({
+                                .trade = trade,
+                                .symbol = request->symbol,
+                                .buyer_socket = buyer_owner.socket,
+                                .seller_socket = seller_owner.socket,
+                                .buyer_risk_client_id =
+                                    buyer_owner.risk_client_id,
+                                .seller_risk_client_id =
+                                    seller_owner.risk_client_id
+                            });
+
+                            risk_engine_.on_trade(
+                                symbol,
+                                buyer_owner.risk_client_id,
+                                seller_owner.risk_client_id,
+                                trade.buy_order_id,
+                                trade.sell_order_id,
                                 trade.quantity
-                            ),
-                            .sequence_number = 0,
-                            .symbol = request->symbol
-                        });
-
-                        if (
-                            trade.buy_order_id != request->order_id &&
-                            instrument->book.find_order(
-                                trade.buy_order_id
-                            ) == nullptr
-                        ) {
-                            deleted_order_ids.insert(
-                                trade.buy_order_id
                             );
+
+                            level3_executions.push_back({
+                                .buy_order_id = trade.buy_order_id,
+                                .sell_order_id = trade.sell_order_id,
+                                .price = static_cast<std::int64_t>(
+                                    trade.price
+                                ),
+                                .quantity = static_cast<std::uint64_t>(
+                                    trade.quantity
+                                ),
+                                .sequence_number = 0,
+                                .symbol = request->symbol
+                            });
+
+                            if (
+                                trade.buy_order_id != request->order_id &&
+                                instrument->book.find_order(
+                                    trade.buy_order_id
+                                ) == nullptr
+                            ) {
+                                deleted_order_ids.insert(
+                                    trade.buy_order_id
+                                );
+                            }
+
+                            if (
+                                trade.sell_order_id != request->order_id &&
+                                instrument->book.find_order(
+                                    trade.sell_order_id
+                                ) == nullptr
+                            ) {
+                                deleted_order_ids.insert(
+                                    trade.sell_order_id
+                                );
+                            }
                         }
 
-                        if (
-                            trade.sell_order_id != request->order_id &&
-                            instrument->book.find_order(
-                                trade.sell_order_id
-                            ) == nullptr
+                        for (
+                            const OrderId deleted_id :
+                            deleted_order_ids
                         ) {
-                            deleted_order_ids.insert(
-                                trade.sell_order_id
-                            );
+                            level3_deletions.push_back({
+                                .order_id = deleted_id,
+                                .sequence_number = 0,
+                                .symbol = request->symbol
+                            });
                         }
-                    }
 
-                    for (const OrderId deleted_id : deleted_order_ids) {
-                        level3_deletions.push_back({
-                            .order_id = deleted_id,
-                            .sequence_number = 0,
-                            .symbol = request->symbol
-                        });
-                    }
-
-                    remove_filled_order_owners(
-                        *instrument,
-                        trade_buffer,
-                        request->order_id
-                    );
-
-                    if (
-                        instrument->book.find_order(
-                            request->order_id
-                        ) != nullptr
-                    ) {
-                        instrument->order_owners[
-                            request->order_id
-                        ] = client_socket;
-
-                        const Order* resting =
-                            instrument->book.find_order(
-                                request->order_id
-                            );
-
-                        level3_add = protocol::Level3AddOrder {
-                            .order_id = resting->id,
-                            .timestamp = resting->timestamp,
-                            .price = static_cast<std::int64_t>(
-                                resting->price
-                            ),
-                            .quantity = static_cast<std::uint64_t>(
-                                resting->remaining_quantity
-                            ),
-                            .side = resting->side == Side::Buy
-                                ? protocol::Side::Buy
-                                : protocol::Side::Sell,
-                            .sequence_number = 0,
-                            .symbol = request->symbol
-                        };
-                    } else {
-                        instrument->order_owners.erase(
+                        remove_filled_order_owners(
+                            *instrument,
+                            trade_buffer,
                             request->order_id
                         );
-                    }
 
-                    snapshot = capture_book_snapshot(
-                        request->symbol,
-                        instrument->book
-                    );
+                        if (
+                            instrument->book.find_order(
+                                request->order_id
+                            ) != nullptr
+                        ) {
+                            instrument->order_owners[
+                                request->order_id
+                            ] = OrderOwner {
+                                .socket = client_socket,
+                                .risk_client_id = risk_client_id
+                            };
+
+                            const Order* resting =
+                                instrument->book.find_order(
+                                    request->order_id
+                                );
+
+                            risk_engine_.on_order_resting(
+                                risk_client_id,
+                                symbol,
+                                resting->id,
+                                resting->side,
+                                resting->price,
+                                resting->remaining_quantity
+                            );
+
+                            level3_add = protocol::Level3AddOrder {
+                                .order_id = resting->id,
+                                .timestamp = resting->timestamp,
+                                .price = static_cast<std::int64_t>(
+                                    resting->price
+                                ),
+                                .quantity = static_cast<std::uint64_t>(
+                                    resting->remaining_quantity
+                                ),
+                                .side = resting->side == Side::Buy
+                                    ? protocol::Side::Buy
+                                    : protocol::Side::Sell,
+                                .sequence_number = 0,
+                                .symbol = request->symbol
+                            };
+                        } else {
+                            instrument->order_owners.erase(
+                                request->order_id
+                            );
+                        }
+
+                        snapshot = capture_book_snapshot(
+                            request->symbol,
+                            instrument->book
+                        );
+                    }
                 }
             }
         }
+    }
+
+    if (
+        !replaced &&
+        risk_reject_reason != RiskRejectReason::None
+    ) {
+        std::cerr
+            << "Risk rejected replacement for "
+            << symbol
+            << " order "
+            << request->order_id
+            << ": "
+            << to_string(risk_reject_reason)
+            << '\n';
     }
 
     send_order_response(
@@ -1170,6 +1404,37 @@ void ExchangeServer::handle_replace_order(
     if (level3_add.has_value()) {
         broadcast_level3_add_order(*level3_add);
     }
+}
+
+void ExchangeServer::append_journal_record(
+    const protocol::MessageHeader& header,
+    std::span<const std::byte> body
+) {
+    if (journal_ == nullptr) {
+        return;
+    }
+
+    const auto encoded_header =
+        protocol::encode_header(header);
+
+    std::vector<std::byte> message;
+    message.reserve(
+        encoded_header.size() + body.size()
+    );
+
+    message.insert(
+        message.end(),
+        encoded_header.begin(),
+        encoded_header.end()
+    );
+
+    message.insert(
+        message.end(),
+        body.begin(),
+        body.end()
+    );
+
+    journal_->append(message);
 }
 
 void ExchangeServer::send_order_response(
@@ -1619,21 +1884,26 @@ ExchangeServer::capture_book_snapshot(
     return snapshot;
 }
 
-int ExchangeServer::find_order_owner(
+ExchangeServer::OrderOwner
+ExchangeServer::find_order_owner(
     const InstrumentState& instrument,
     OrderId order_id,
     OrderId incoming_order_id,
-    int incoming_socket
+    int incoming_socket,
+    RiskClientId incoming_risk_client_id
 ) const {
     if (order_id == incoming_order_id) {
-        return incoming_socket;
+        return {
+            .socket = incoming_socket,
+            .risk_client_id = incoming_risk_client_id
+        };
     }
 
     const auto owner =
         instrument.order_owners.find(order_id);
 
     if (owner == instrument.order_owners.end()) {
-        return -1;
+        return {};
     }
 
     return owner->second;
@@ -1690,14 +1960,41 @@ ExchangeServer::find_instrument(
     return &iterator->second;
 }
 
-void ExchangeServer::register_client(
+std::optional<Price>
+ExchangeServer::market_reference_price(
+    Side side,
+    const OrderBook& book
+) const {
+    if (side == Side::Buy) {
+        if (!book.has_asks()) {
+            return std::nullopt;
+        }
+
+        return book.best_ask();
+    }
+
+    if (!book.has_bids()) {
+        return std::nullopt;
+    }
+
+    return book.best_bid();
+}
+
+RiskClientId ExchangeServer::register_client(
     int client_socket
 ) {
+    const RiskClientId risk_client_id =
+        next_risk_client_id_.fetch_add(1);
+
     std::lock_guard<std::mutex> lock(
         clients_mutex_
     );
 
     client_sockets_.push_back(client_socket);
+    client_risk_ids_[client_socket] =
+        risk_client_id;
+
+    return risk_client_id;
 }
 
 void ExchangeServer::unregister_client(
@@ -1716,6 +2013,25 @@ void ExchangeServer::unregister_client(
     if (position != client_sockets_.end()) {
         client_sockets_.erase(position);
     }
+
+    client_risk_ids_.erase(client_socket);
+}
+
+RiskClientId ExchangeServer::risk_client_id_for_socket(
+    int client_socket
+) {
+    std::lock_guard<std::mutex> lock(
+        clients_mutex_
+    );
+
+    const auto iterator =
+        client_risk_ids_.find(client_socket);
+
+    if (iterator == client_risk_ids_.end()) {
+        return invalid_risk_client_id;
+    }
+
+    return iterator->second;
 }
 
 std::vector<int>

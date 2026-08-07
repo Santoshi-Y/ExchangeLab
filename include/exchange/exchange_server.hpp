@@ -18,6 +18,7 @@
 #include "exchange/multicast_publisher.hpp"
 #include "exchange/order_book.hpp"
 #include "exchange/protocol.hpp"
+#include "exchange/risk_engine.hpp"
 #include "exchange/tcp_server.hpp"
 #include "exchange/trade.hpp"
 
@@ -44,7 +45,8 @@ public:
         std::optional<std::filesystem::path> journal_path =
             std::nullopt,
         std::optional<MulticastConfig> multicast_config =
-            std::nullopt
+            std::nullopt,
+        RiskLimits risk_limits = {}
     );
 
     ~ExchangeServer();
@@ -61,17 +63,38 @@ public:
     [[nodiscard]] const RecoveryState&
     recovery_state() const noexcept;
 
+    [[nodiscard]] const RiskLimits&
+    risk_limits() const noexcept;
+
+    /*
+     * Administrative circuit breaker. Existing resting orders remain on
+     * the book; new and replacement orders are rejected while enabled.
+     * Cancels are intentionally still allowed so exposure can be reduced.
+     */
+    void set_global_kill_switch(bool enabled);
+
 private:
+    struct OrderOwner {
+        int socket {-1};
+        RiskClientId risk_client_id {invalid_risk_client_id};
+    };
+
     struct InstrumentState {
         OrderBook book;
-        std::unordered_map<OrderId, int> order_owners;
+        std::unordered_map<OrderId, OrderOwner> order_owners;
     };
 
     struct ExecutionDelivery {
         Trade trade;
         protocol::Symbol symbol;
-        int buyer_socket;
-        int seller_socket;
+        int buyer_socket {-1};
+        int seller_socket {-1};
+        RiskClientId buyer_risk_client_id {
+            invalid_risk_client_id
+        };
+        RiskClientId seller_risk_client_id {
+            invalid_risk_client_id
+        };
     };
 
     struct BookSnapshot {
@@ -121,6 +144,11 @@ private:
         MatchingEngine::BufferedTrades& trade_buffer
     );
 
+    void append_journal_record(
+        const protocol::MessageHeader& header,
+        std::span<const std::byte> body
+    );
+
     void send_order_response(
         int client_socket,
         std::uint64_t order_id,
@@ -160,11 +188,12 @@ private:
         const OrderBook& book
     ) const;
 
-    [[nodiscard]] int find_order_owner(
+    [[nodiscard]] OrderOwner find_order_owner(
         const InstrumentState& instrument,
         OrderId order_id,
         OrderId incoming_order_id,
-        int incoming_socket
+        int incoming_socket,
+        RiskClientId incoming_risk_client_id
     ) const;
 
     void remove_filled_order_owners(
@@ -181,14 +210,28 @@ private:
         const std::string& symbol
     );
 
-    void register_client(int client_socket);
+    [[nodiscard]] std::optional<Price>
+    market_reference_price(
+        Side side,
+        const OrderBook& book
+    ) const;
+
+    [[nodiscard]] RiskClientId register_client(
+        int client_socket
+    );
+
     void unregister_client(int client_socket);
+
+    [[nodiscard]] RiskClientId risk_client_id_for_socket(
+        int client_socket
+    );
 
     [[nodiscard]] std::vector<int>
     client_socket_snapshot();
 
     TcpServer server_;
     MatchingEngine engine_;
+    RiskEngine risk_engine_;
 
     std::mutex engine_mutex_;
     std::unordered_map<std::string, InstrumentState> instruments_;
@@ -196,6 +239,7 @@ private:
     std::mutex send_mutex_;
     std::mutex clients_mutex_;
     std::vector<int> client_sockets_;
+    std::unordered_map<int, RiskClientId> client_risk_ids_;
     std::mutex threads_mutex_;
     std::vector<std::thread> client_threads_;
 
@@ -211,6 +255,7 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<std::uint64_t> next_sequence_number_;
+    std::atomic<RiskClientId> next_risk_client_id_;
 };
 
 }  // namespace exchange

@@ -19,6 +19,7 @@ add_library(
     exchange_lab_lib
     src/tcp_server.cpp
     src/exchange_server.cpp
+    src/risk_engine.cpp
     src/multicast_publisher.cpp
     src/journal.cpp
     src/replay.cpp
@@ -103,6 +104,17 @@ target_link_libraries(
 )
 
 add_executable(
+    exchange_risk_demo
+    tools/exchange_risk_demo.cpp
+)
+
+target_link_libraries(
+    exchange_risk_demo
+    PRIVATE
+        exchange_lab_lib
+)
+
+add_executable(
     exchange_websocket_gateway
     tools/exchange_websocket_gateway.cpp
     src/websocket_gateway.cpp
@@ -149,6 +161,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     )
 
     target_compile_options(
+        exchange_risk_demo
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    target_compile_options(
         exchange_websocket_gateway
         PRIVATE
             -Wall
@@ -176,6 +196,12 @@ elseif(MSVC)
 
     target_compile_options(
         exchange_market_data_listener
+        PRIVATE
+            /W4
+    )
+
+    target_compile_options(
+        exchange_risk_demo
         PRIVATE
             /W4
     )
@@ -226,6 +252,7 @@ if(EXCHANGELAB_BUILD_TESTS)
         tests/multicast_publisher_test.cpp
         tests/websocket_gateway_test.cpp
         tests/multi_symbol_test.cpp
+        tests/risk_engine_test.cpp
         src/websocket_gateway.cpp
     )
 
